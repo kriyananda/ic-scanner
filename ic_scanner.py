@@ -128,54 +128,120 @@ def kv_row(label, value, color="#e2e8f0"):
             f'</div>')
 
 
-# ── CALENDARIO MACRO: FETCH LIVE ──────────────────────────────────
+# ── PAROLE CHIAVE EVENTI CRITICI ──────────────────────────────────
+CRITICAL_KEYWORDS = [
+    "fomc", "federal reserve", "interest rate", "rate decision",
+    "cpi", "consumer price", "core cpi",
+    "pce", "personal consumption",
+    "nonfarm payroll", "nfarm", "nfp", "employment",
+    "jackson hole",
+    "gdp", "gross domestic",
+    "retail sales",
+    "initial jobless",
+]
+
+MEDIUM_KEYWORDS = [
+    "ppi", "producer price",
+    "ism manufacturing", "ism services",
+    "michigan consumer",
+    "jolts", "job openings",
+    "durable goods",
+    "trade balance",
+    "housing starts",
+    "building permits",
+]
+
+def is_critical(name):
+    n = name.lower()
+    return any(k in n for k in CRITICAL_KEYWORDS)
+
+def is_medium(name):
+    n = name.lower()
+    return any(k in n for k in MEDIUM_KEYWORDS)
+
+
+# ── CALENDARIO MACRO: FETCH LIVE VIA FINNHUB ──────────────────────
 @st.cache_data(ttl=3600)   # cache 1 ora
 def fetch_macro_events():
     """
-    Recupera eventi macro dalla settimana corrente e la prossima
-    usando l'API pubblica di Tradingeconomics (gratuita, no auth).
-    Fallback: lista hardcoded degli eventi da monitorare sempre.
+    Recupera eventi macro US delle prossime 2 settimane via Finnhub.
+    Richiede FINNHUB_API_KEY nei Secrets di Streamlit (gratuita).
+    Fallback automatico se la chiave non è configurata.
     """
-    events = []
-    try:
-        # Tradingeconomics calendar — dati US
-        today = date.today()
-        end   = today + timedelta(days=14)
-        url   = (f"https://api.tradingeconomics.com/calendar/country/united%20states/"
-                 f"{today.isoformat()}/{end.isoformat()}")
-        r = requests.get(url, timeout=8)
-        if r.status_code == 200:
-            data = r.json()
-            critical = {
-                "Interest Rate Decision", "Fed Interest Rate Decision",
-                "FOMC Meeting Minutes", "FOMC Minutes",
-                "CPI", "Core CPI", "PCE Price Index", "Core PCE",
-                "Nonfarm Payrolls", "NFP",
-                "Initial Jobless Claims",
-                "GDP", "Retail Sales",
-                "Jackson Hole",
-            }
-            for item in data:
-                name = item.get("Event", "")
-                if any(k.lower() in name.lower() for k in critical):
-                    dt = item.get("Date", "")[:10]
-                    events.append({
-                        "date": dt,
-                        "name": name,
-                        "importance": item.get("Importance", 2),
-                    })
-    except Exception:
-        pass
+    api_key = st.secrets.get("FINNHUB_API_KEY", "")
+    events  = []
 
-    # Fallback / integrazione manuale se fetch vuoto
+    if api_key:
+        try:
+            today = date.today()
+            end   = today + timedelta(days=14)
+            url   = (
+                f"https://finnhub.io/api/v1/calendar/economic"
+                f"?from={today.isoformat()}"
+                f"&to={end.isoformat()}"
+                f"&token={api_key}"
+            )
+            r = requests.get(url, timeout=10,
+                             headers={"User-Agent": "ic-scanner/1.0"})
+
+            if r.status_code == 200:
+                data = r.json()
+                # Finnhub restituisce {"economicCalendar": [...]}
+                items = data.get("economicCalendar", data if isinstance(data, list) else [])
+
+                for item in items:
+                    # Filtra solo eventi USA
+                    country = item.get("country", "").upper()
+                    if country and country not in ("US", "USA", ""):
+                        continue
+
+                    name   = item.get("event", item.get("name", ""))
+                    dt_raw = item.get("time", item.get("date", ""))
+                    dt     = dt_raw[:10] if dt_raw else "—"
+                    impact = item.get("impact", "")
+
+                    if not name:
+                        continue
+
+                    if is_critical(name) or str(impact).lower() in ("high", "3"):
+                        events.append({
+                            "date":       dt,
+                            "name":       name,
+                            "importance": 3,
+                            "critical":   True,
+                        })
+                    elif is_medium(name) or str(impact).lower() in ("medium", "2"):
+                        events.append({
+                            "date":       dt,
+                            "name":       name,
+                            "importance": 2,
+                            "critical":   False,
+                        })
+
+                # Ordina per data
+                events.sort(key=lambda x: x["date"])
+
+        except Exception as e:
+            events = []
+
+    # ── Fallback: nessuna chiave o fetch fallito ───────────────────
     if not events:
-        # Genera promemoria statici sulle date tipiche mensili
-        today = date.today()
-        events.append({
-            "date": "—",
-            "name": "⚠ Fetch automatico non disponibile — verifica manualmente su investing.com/economic-calendar",
-            "importance": 3,
-        })
+        if not api_key:
+            events.append({
+                "date":       "—",
+                "name":       "🔑 Chiave FINNHUB_API_KEY non configurata nei Secrets — "
+                              "registrati su finnhub.io (gratis) e aggiungila",
+                "importance": 3,
+                "critical":   False,
+            })
+        else:
+            events.append({
+                "date":       "—",
+                "name":       "⚠ Nessun evento recuperato — verifica la chiave Finnhub "
+                              "o controlla manualmente investing.com/economic-calendar",
+                "importance": 2,
+                "critical":   False,
+            })
 
     return events
 
@@ -226,6 +292,39 @@ def run_analysis(vol_data, macro_events, tnx, tnx_var, vix, note):
 
     today = datetime.now(ZoneInfo("Europe/Rome")).strftime("%A %d %B %Y")
 
+    # ── VETO PRE-AI: calcola blocchi critici in Python ────────────
+    # B1: almeno un indice con IVR>50 E iv>=hv
+    b1_pass = any(
+        float(d.get("ivr", 0)) > 50 and float(d.get("iv", 0)) >= float(d.get("hv", 0))
+        for d in vol_data.values()
+        if d.get("ivr")
+    )
+
+    # B2: nessun evento critico nelle prossime 2 settimane
+    real_critical = [
+        e for e in macro_events
+        if e.get("critical", False) and e.get("date", "—") != "—"
+    ]
+    b2_pass = len(real_critical) == 0
+
+    # B3: TNX < 4.5 e variazione < 0.15
+    b3_pass = tnx < 4.5 and abs(tnx_var) < 0.15
+
+    # B5: VIX < 20
+    b5_pass = vix < 20
+
+    # ── VETO ASSOLUTO ─────────────────────────────────────────────
+    # Se B1 o B2 falliscono → NO. Sempre. Senza eccezioni.
+    veto_triggered = not b1_pass or not b2_pass
+    veto_reason    = []
+    if not b1_pass:
+        veto_reason.append("B1 FALLISCE: nessun indice ha IVR>50 e IV≥HV")
+    if not b2_pass:
+        events_str = ", ".join(
+            f"{e['date']} {e['name']}" for e in real_critical[:3]
+        )
+        veto_reason.append(f"B2 FALLISCE: eventi critici in calendario ({events_str})")
+
     vol_summary = "\n".join([
         f"  {idx}: IV={d['iv']}% HV={d['hv']}% IVR={d['ivr']}% "
         f"IVP={d['ivp']}% Prezzo={d.get('price', 'n/d')}"
@@ -234,9 +333,10 @@ def run_analysis(vol_data, macro_events, tnx, tnx_var, vix, note):
     ])
 
     macro_summary = "\n".join([
-        f"  {e['date']} — {e['name']}"
+        f"  {e['date']} — {e['name']} {'⚠ CRITICO' if e.get('critical') else ''}"
         for e in macro_events[:10]
-    ]) or "  Nessun evento critico rilevato"
+        if e.get("date", "—") != "—"
+    ]) or "  Nessun evento rilevato"
 
     prompt = f"""Oggi è {today}.
 
@@ -246,57 +346,47 @@ DATI REALI DI VOLATILITÀ (usali ESATTAMENTE nel blocco B1, non inventare):
 EVENTI MACRO PROSSIME 2 SETTIMANE:
 {macro_summary}
 
+VALUTAZIONE PRE-CALCOLATA (VINCOLANTE — non puoi ignorarla):
+  B1 passa: {b1_pass}
+  B2 passa: {b2_pass} {'— VETO ATTIVO: eventi critici presenti' if not b2_pass else ''}
+  B3 passa: {b3_pass}
+  B5 passa: {b5_pass}
+  VETO ASSOLUTO ATTIVO: {veto_triggered}
+  {'MOTIVO VETO: ' + ' | '.join(veto_reason) if veto_triggered else ''}
+
 DATI AGGIUNTIVI:
   Treasury 10Y (TNX): {tnx}%
   Variazione TNX ultimi 3 giorni: {tnx_var:+.2f}%
   VIX: {vix}
 {f"  Note operatore: {note}" if note else ""}
 
-Analizza e dimmi se aprire un Iron Condor su XSP, XND o RUTW.
-Verifica tutti e 5 i blocchi della checklist e rispondi SOLO con JSON."""
+{'ISTRUZIONE VINCOLANTE: il veto è attivo. verdict DEVE essere NO. Non scrivere GO o WAIT.' if veto_triggered else ''}
+Analizza e rispondi SOLO con JSON."""
 
     system = """Sei un assistente per opzioni finanziarie. Rispondi SOLO con JSON puro, no markdown, no backtick.
-I dati di volatilità B1 sono forniti dall'utente — usali ESATTAMENTE, non inventare valori.
-Regole:
-  B1 pass = almeno un indice ha IVR>50 E iv>=hv. best = indice con IVR più alto che passa.
-  B2 pass = nessun evento FOMC/CPI/NFP/Jackson Hole nella lista macro ricevuta.
-  B3 pass = tnx < 4.5 E variazione 3gg < 0.15.
-  B4 sempre true se esiste un setup valido con DTE 21-30.
-  B5 pass = vix < 20 E mercato non in trend forte.
+
+REGOLE DI VETO ASSOLUTE — queste hanno priorità su tutto:
+  - Se B2_pass=false nel prompt (eventi FOMC/CPI/NFP/Jackson Hole presenti): verdict = "NO" OBBLIGATORIO
+  - Se B1_pass=false nel prompt (nessun indice con IVR>50 e IV>=hv): verdict = "NO" OBBLIGATORIO
+  - Se VETO ASSOLUTO ATTIVO=True nel prompt: verdict = "NO" OBBLIGATORIO, SEMPRE
+  - Non esiste nessuna combinazione di altri blocchi che possa produrre GO se il veto è attivo
+
+REGOLE NORMALI (solo se veto non attivo):
+  B1 pass = almeno un indice ha IVR>50 E iv>=hv
+  B2 pass = nessun evento FOMC/CPI/NFP/Jackson Hole nella lista
+  B3 pass = tnx < 4.5 E variazione 3gg < 0.15
+  B4 pass = esiste setup valido con DTE 21-30 e delta 0.15-0.20 sulle short
+  B5 pass = vix < 20 E no trend forte
+  GO solo se tutti e 5 i blocchi passano.
+  WAIT se 3-4 blocchi passano.
+  NO se meno di 3 blocchi passano O se veto attivo.
+
+DELTA: gli strike short del setup devono essere a delta 0.15-0.20.
+  Aggiungi nel setup: "put_short_delta" e "call_short_delta" (valori tra 0.15 e 0.20).
+
 Note MAX 60 caratteri. Motivation MAX 300 caratteri.
 Struttura JSON esatta:
-{
-  "verdict": "GO"|"WAIT"|"NO",
-  "score": 0-5,
-  "blocks": {
-    "B1_volatility": {
-      "pass": false,
-      "best": "XND",
-      "note": "stringa max 60 char",
-      "indices": {
-        "XSP":  {"pass": false, "ivr": 14.02, "ivp": 10, "iv": 12.10, "hv": 12.23},
-        "XND":  {"pass": false, "ivr": 60.78, "ivp": 40, "iv": 19.22, "hv": 22.27},
-        "RUTW": {"pass": false, "ivr": 45,    "ivp": 35, "iv": 16.5,  "hv": 18.2}
-      }
-    },
-    "B2_macro":     {"pass": true,  "events": [], "note": "stringa max 60 char"},
-    "B3_yields":    {"pass": true,  "tnx": 4.21, "change3d": 0.06, "note": "stringa max 60 char"},
-    "B4_structure": {"pass": true,  "dte_ok": true, "credit_ok": true, "note": "stringa max 60 char"},
-    "B5_trend":     {"pass": true,  "vix": 15.2, "trending": false, "note": "stringa max 60 char"}
-  },
-  "setup": {
-    "underlying": "XND",
-    "expiration": "2026-09-18",
-    "dte": 28,
-    "put_short": 280, "put_long": 270,
-    "call_short": 310, "call_long": 320,
-    "credit": 380, "max_loss": 620,
-    "breakeven_low": 276.2, "breakeven_high": 313.8,
-    "tp_target": 190, "sl_trigger": 760
-  },
-  "motivation": "Spiegazione in italiano max 300 caratteri.",
-  "assignment_risk": "Zero — European-style cash-settled."
-}"""
+{"verdict":"NO","score":1,"blocks":{"B1_volatility":{"pass":false,"best":"XND","note":"IVR ok ma IV sotto HV","indices":{"XSP":{"pass":false,"ivr":14.02,"ivp":10,"iv":12.10,"hv":12.23},"XND":{"pass":false,"ivr":60.78,"ivp":40,"iv":19.22,"hv":22.27},"RUTW":{"pass":false,"ivr":45,"ivp":35,"iv":16.5,"hv":18.2}}},"B2_macro":{"pass":false,"events":["11 set CPI","16 set FOMC"],"note":"CPI e FOMC presenti — veto attivo"},"B3_yields":{"pass":true,"tnx":4.21,"change3d":0.06,"note":"TNX stabile"},"B4_structure":{"pass":true,"dte_ok":true,"credit_ok":true,"note":"DTE 28gg delta 0.17"},"B5_trend":{"pass":true,"vix":15.2,"trending":false,"note":"mercato laterale"}},"setup":{"underlying":"XND","expiration":"2026-09-18","dte":28,"put_short":280,"put_short_delta":0.17,"put_long":270,"call_short":310,"call_short_delta":0.16,"call_long":320,"credit":380,"max_loss":620,"breakeven_low":276.2,"breakeven_high":313.8,"tp_target":190,"sl_trigger":760},"motivation":"VETO: CPI 11 set e FOMC 16 set nelle prossime 2 settimane. Non aprire IC. Aspetta dopo il 16 settembre.","assignment_risk":"Zero — European-style cash-settled."}"""
 
     try:
         msg = client.messages.create(
@@ -306,7 +396,32 @@ Struttura JSON esatta:
             messages=[{"role": "user", "content": prompt}],
         )
         raw = msg.content[0].text
-        return parse_robust(raw)
+        result = parse_robust(raw)
+
+        # ── OVERRIDE DI SICUREZZA IN PYTHON ──────────────────────
+        # Se il modello ha ignorato il veto, lo forziamo qui
+        if result and veto_triggered:
+            if result.get("verdict") in ("GO", "WAIT"):
+                result["verdict"] = "NO"
+                result["score"]   = min(result.get("score", 0),
+                                        sum([b3_pass, b5_pass]))
+                result["motivation"] = (
+                    "⛔ VETO AUTOMATICO: " + " | ".join(veto_reason) +
+                    ". Non aprire Iron Condor finché questi blocchi non passano."
+                )
+                # Forza B2 a false se ci sono eventi critici
+                if not b2_pass and "B2_macro" in result.get("blocks", {}):
+                    result["blocks"]["B2_macro"]["pass"] = False
+                    result["blocks"]["B2_macro"]["events"] = [
+                        f"{e['date']} — {e['name']}"
+                        for e in real_critical[:5]
+                    ]
+                    result["blocks"]["B2_macro"]["note"] = (
+                        "VETO: eventi critici presenti"
+                    )
+
+        return result
+
     except Exception as e:
         st.error(f"Errore API: {e}")
         return None
@@ -420,34 +535,40 @@ with st.spinner("Scarico eventi macro..."):
 
 if macro_events:
     critical_found = []
-    for e in macro_events:
-        name = e.get("name", "")
-        dt   = e.get("date", "")
-        imp  = e.get("importance", 1)
-        is_critical = any(k in name.upper() for k in [
-            "FOMC", "RATE", "CPI", "PCE", "PAYROLL", "NFP",
-            "JACKSON", "GDP", "INTEREST"
-        ])
-        col_e = "#ef4444" if is_critical else "#f59e0b" if imp >= 2 else "#64748b"
-        icon  = "🔴" if is_critical else "🟡" if imp >= 2 else "⚪"
+    real_events    = [e for e in macro_events if e.get("date", "—") != "—"]
+    info_events    = [e for e in macro_events if e.get("date", "—") == "—"]
+
+    # Messaggi di sistema (chiave mancante, errori)
+    for e in info_events:
+        st.info(e.get("name", ""))
+
+    # Eventi reali
+    for e in real_events:
+        name      = e.get("name", "")
+        dt        = e.get("date", "")
+        crit      = e.get("critical", False)
+        imp       = e.get("importance", 1)
+        col_e     = "#ef4444" if crit else "#f59e0b" if imp >= 2 else "#64748b"
+        icon      = "🔴" if crit else "🟡" if imp >= 2 else "⚪"
         st.markdown(
             f'<div style="padding:5px 0;border-bottom:1px solid #25253533;">'
             f'{icon} <span style="color:{col_e};font-size:12px;">'
             f'<b>{dt}</b> — {name}</span></div>',
             unsafe_allow_html=True
         )
-        if is_critical:
+        if crit:
             critical_found.append(name)
 
-    if critical_found:
-        st.warning(
-            f"⚠ **{len(critical_found)} evento/i critico/i rilevato/i** "
-            f"— B2 probabilmente FALLISCE. Valuta se aspettare."
-        )
-    else:
-        st.success("✅ Nessun evento critico nelle prossime 2 settimane — B2 dovrebbe passare.")
+    if real_events:
+        if critical_found:
+            st.warning(
+                f"⚠ **{len(critical_found)} evento/i critico/i** nelle prossime 2 settimane "
+                f"— B2 probabilmente FALLISCE. Valuta se aspettare."
+            )
+        else:
+            st.success("✅ Nessun evento critico rilevato — B2 dovrebbe passare.")
 else:
-    st.info("Nessun evento recuperato. Verifica manualmente su investing.com/economic-calendar")
+    st.info("Nessun evento recuperato.")
 
 st.divider()
 
@@ -596,17 +717,19 @@ if st.button("🔍 ANALIZZA CON DATI REALI", disabled=not has_data):
             st.markdown("### 🎯 Setup Proposto")
             s = setup
             rows_s = [
-                ("Sottostante",       s.get("underlying", "—")),
-                ("Scadenza",          s.get("expiration", "—")),
-                ("DTE",               f"{s.get('dte','?')} giorni"),
-                ("Put short / long",  f"{s.get('put_short','?')} / {s.get('put_long','?')}"),
-                ("Call short / long", f"{s.get('call_short','?')} / {s.get('call_long','?')}"),
-                ("Credito incassato", f"${s.get('credit','?')}"),
-                ("Max loss",          f"${s.get('max_loss','?')}"),
-                ("Breakeven basso",   s.get("breakeven_low", "?")),
-                ("Breakeven alto",    s.get("breakeven_high", "?")),
-                ("Take profit 50%",   f"${s.get('tp_target','?')}"),
-                ("Stop loss 200%",    f"${s.get('sl_trigger','?')}"),
+                ("Sottostante",         s.get("underlying", "—")),
+                ("Scadenza",            s.get("expiration", "—")),
+                ("DTE",                 f"{s.get('dte','?')} giorni"),
+                ("Put short",           f"{s.get('put_short','?')}  (Δ {s.get('put_short_delta','~0.17')})"),
+                ("Put long",            f"{s.get('put_long','?')}"),
+                ("Call short",          f"{s.get('call_short','?')}  (Δ {s.get('call_short_delta','~0.17')})"),
+                ("Call long",           f"{s.get('call_long','?')}"),
+                ("Credito incassato",   f"${s.get('credit','?')}"),
+                ("Max loss",            f"${s.get('max_loss','?')}"),
+                ("Breakeven basso",     s.get("breakeven_low", "?")),
+                ("Breakeven alto",      s.get("breakeven_high", "?")),
+                ("Take profit 50%",     f"${s.get('tp_target','?')}"),
+                ("Stop loss 200%",      f"${s.get('sl_trigger','?')}"),
             ]
             html_rows = "".join(kv_row(k, v) for k, v in rows_s)
             st.markdown(f"""
