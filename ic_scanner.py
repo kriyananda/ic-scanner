@@ -34,60 +34,138 @@ st.set_page_config(
 st.markdown("""
 <style>
   /* Sfondo generale */
-  .stApp { background-color: #0b0d10; color: #e2e8f0; }
-  section[data-testid="stSidebar"] { background: #13161c; }
+  .stApp { background-color: #0b0d10 !important; color: #e2e8f0 !important; }
+  section[data-testid="stSidebar"] { background: #13161c !important; }
 
-  /* Input numerici */
-  input[type="number"] {
-    background: #13161c !important;
-    border: 1px solid #252a35 !important;
-    border-radius: 6px !important;
+  /* FORZA TESTO BIANCO SU TUTTO */
+  .stApp * { color: #e2e8f0 !important; }
+
+  /* Label dei number_input */
+  label, .stNumberInput label,
+  [data-testid="stWidgetLabel"],
+  [data-testid="stWidgetLabel"] p,
+  .stNumberInput > label,
+  div[data-testid="stNumberInput"] label,
+  div[data-testid="stNumberInput"] p {
     color: #e2e8f0 !important;
-    font-weight: 600 !important;
+    font-weight: 700 !important;
+    font-size: 13px !important;
+  }
+
+  /* Campi numerici */
+  input, input[type="number"],
+  .stNumberInput input {
+    background: #1e2330 !important;
+    border: 1px solid #3b82f6 !important;
+    border-radius: 6px !important;
+    color: #ffffff !important;
+    font-weight: 700 !important;
+    font-size: 15px !important;
+    text-align: center !important;
+  }
+  input:focus, .stNumberInput input:focus {
+    border-color: #60a5fa !important;
+    box-shadow: 0 0 0 2px #3b82f630 !important;
+  }
+
+  /* Pulsanti +/- dei number_input */
+  .stNumberInput button,
+  button[data-testid="stNumberInputStepUp"],
+  button[data-testid="stNumberInputStepDown"] {
+    background: #252a35 !important;
+    color: #e2e8f0 !important;
+    border: 1px solid #3b4252 !important;
+  }
+  .stNumberInput button:hover {
+    background: #3b82f6 !important;
+    color: #ffffff !important;
   }
 
   /* Textarea */
   textarea {
-    background: #13161c !important;
+    background: #1e2330 !important;
+    border: 1px solid #3b4252 !important;
+    color: #e2e8f0 !important;
+    font-size: 13px !important;
+  }
+
+  /* Expander header */
+  .streamlit-expanderHeader,
+  [data-testid="stExpander"] summary,
+  [data-testid="stExpander"] summary p,
+  [data-testid="stExpanderToggleIcon"] {
+    background: #181c24 !important;
+    border: 1px solid #3b4252 !important;
+    border-radius: 8px !important;
+    color: #e2e8f0 !important;
+    font-weight: 700 !important;
+    font-size: 14px !important;
+  }
+  [data-testid="stExpander"] {
+    background: #181c24 !important;
     border: 1px solid #252a35 !important;
+    border-radius: 10px !important;
+  }
+
+  /* Testo dentro gli expander */
+  [data-testid="stExpander"] p,
+  [data-testid="stExpander"] span,
+  [data-testid="stExpander"] div {
     color: #e2e8f0 !important;
   }
 
-  /* Bottoni primari */
+  /* Caption e testo secondario */
+  .stCaption, [data-testid="stCaptionContainer"] p {
+    color: #94a3b8 !important;
+    font-size: 12px !important;
+  }
+
+  /* Titoli markdown */
+  h1, h2, h3, h4 { color: #f1f5f9 !important; }
+  p { color: #e2e8f0 !important; }
+
+  /* Metriche */
+  [data-testid="metric-container"] {
+    background: #181c24 !important;
+    border: 1px solid #252a35 !important;
+    border-radius: 10px !important;
+    padding: 12px !important;
+  }
+  [data-testid="metric-container"] label,
+  [data-testid="metric-container"] p,
+  [data-testid="stMetricLabel"] p,
+  [data-testid="stMetricValue"] div {
+    color: #e2e8f0 !important;
+  }
+
+  /* Alert/info/warning/success */
+  .stAlert { border-radius: 8px !important; }
+  [data-testid="stAlert"] p { color: inherit !important; }
+
+  /* Bottone primario */
   .stButton > button {
     background: #3b82f6 !important;
-    color: white !important;
+    color: #ffffff !important;
     border: none !important;
     border-radius: 10px !important;
     font-weight: 700 !important;
     font-size: 15px !important;
     padding: 12px 0 !important;
     width: 100% !important;
-    transition: background 0.2s !important;
   }
-  .stButton > button:hover {
-    background: #2563eb !important;
-  }
-
-  /* Expander */
-  .streamlit-expanderHeader {
-    background: #181c24 !important;
-    border: 1px solid #252a35 !important;
-    border-radius: 8px !important;
-    color: #e2e8f0 !important;
-    font-weight: 600 !important;
-  }
-
-  /* Metriche */
-  [data-testid="metric-container"] {
-    background: #181c24;
-    border: 1px solid #252a35;
-    border-radius: 10px;
-    padding: 12px;
+  .stButton > button:hover { background: #2563eb !important; }
+  .stButton > button:disabled {
+    background: #334155 !important;
+    color: #64748b !important;
   }
 
   /* Divider */
   hr { border-color: #252a35 !important; }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: #0b0d10; }
+  ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
 
   /* Nasconde hamburger menu e footer */
   #MainMenu, footer { visibility: hidden; }
