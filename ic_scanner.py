@@ -1,44 +1,28 @@
 """
 IC Scanner — Iron Condor Screener
-Streamlit app per XSP / XND / RUTW con calendario macro Finnhub
-e analisi opzionale tramite Anthropic.
+Standalone Streamlit app con dati macro live e analisi AI.
 
-REQUISITI:
-    pip install -r requirements.txt
+Requisiti:
+  pip install streamlit anthropic requests pandas
 
-AVVIO LOCALE:
-    streamlit run ic_scanner.py
+Avvio locale:
+  streamlit run ic_scanner.py
 
-STREAMLIT CLOUD:
-    Secrets -> Advanced settings -> Secrets
-
-    FINNHUB_API_KEY = "la_tua_chiave_finnhub"
-    ANTHROPIC_API_KEY = "la_tua_chiave_anthropic"   # opzionale
-
-IMPORTANTE:
-- Non inserire mai le chiavi API direttamente nel codice.
-- Non fare commit di .streamlit/secrets.toml su GitHub.
+Deploy su Streamlit Cloud:
+  1. Carica su GitHub
+  2. Vai su share.streamlit.io
+  3. Aggiungi ANTHROPIC_API_KEY nei Secrets
 """
 
+import streamlit as st
+import anthropic
+import requests
 import json
-import os
-import html
-from datetime import date, datetime, timedelta
+import re
+from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 
-import requests
-import streamlit as st
-
-try:
-    import anthropic
-except ImportError:
-    anthropic = None
-
-
-# ============================================================
-# CONFIG
-# ============================================================
-
+# ── CONFIGURAZIONE PAGINA ─────────────────────────────────────────
 st.set_page_config(
     page_title="IC Scanner",
     page_icon="📊",
@@ -46,335 +30,333 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-ROME_TZ = ZoneInfo("Europe/Rome")
-FINNHUB_URL = "https://finnhub.io/api/v1/calendar/economic"
-ANTHROPIC_MODEL = "claude-sonnet-4-6"
+# ── CSS DARK TERMINAL ─────────────────────────────────────────────
+st.markdown("""
+<style>
+  /* Sfondo generale */
+  .stApp { background-color: #0b0d10 !important; color: #e2e8f0 !important; }
+  section[data-testid="stSidebar"] { background: #13161c !important; }
 
-INDICES = {
-    "XSP": "S&P 500 Mini ($XSP)",
-    "XND": "Nasdaq 100 Mini ($XND)",
-    "RUTW": "Russell 2000 ($RUT / RUTW)",
-}
+  /* Label dei number_input */
+  label, .stNumberInput label,
+  [data-testid="stWidgetLabel"],
+  [data-testid="stWidgetLabel"] p,
+  .stNumberInput > label,
+  div[data-testid="stNumberInput"] label,
+  div[data-testid="stNumberInput"] p {
+    color: #e2e8f0 !important;
+    font-weight: 700 !important;
+    font-size: 13px !important;
+  }
 
+  /* Campi numerici */
+  input, input[type="number"],
+  .stNumberInput input {
+    background: #1e2330 !important;
+    border: 1px solid #3b82f6 !important;
+    border-radius: 6px !important;
+    color: #ffffff !important;
+    font-weight: 700 !important;
+    font-size: 15px !important;
+    text-align: center !important;
+  }
+  input:focus, .stNumberInput input:focus {
+    border-color: #60a5fa !important;
+    box-shadow: 0 0 0 2px #3b82f630 !important;
+  }
+
+  /* Pulsanti +/- dei number_input */
+  .stNumberInput button,
+  button[data-testid="stNumberInputStepUp"],
+  button[data-testid="stNumberInputStepDown"] {
+    background: #252a35 !important;
+    color: #e2e8f0 !important;
+    border: 1px solid #3b4252 !important;
+  }
+  .stNumberInput button:hover {
+    background: #3b82f6 !important;
+    color: #ffffff !important;
+  }
+
+  /* Textarea */
+  textarea {
+    background: #1e2330 !important;
+    border: 1px solid #3b4252 !important;
+    color: #e2e8f0 !important;
+    font-size: 13px !important;
+  }
+
+  /* Expander header */
+  .streamlit-expanderHeader,
+  [data-testid="stExpander"] summary,
+  [data-testid="stExpander"] summary p,
+  [data-testid="stExpanderToggleIcon"] {
+    background: #181c24 !important;
+    border: 1px solid #3b4252 !important;
+    border-radius: 8px !important;
+    color: #e2e8f0 !important;
+    font-weight: 700 !important;
+    font-size: 14px !important;
+  }
+  [data-testid="stExpander"] {
+    background: #181c24 !important;
+    border: 1px solid #252a35 !important;
+    border-radius: 10px !important;
+  }
+
+  /* Testo dentro gli expander */
+  [data-testid="stExpander"] p,
+  [data-testid="stExpander"] span,
+  [data-testid="stExpander"] div {
+    color: #e2e8f0 !important;
+  }
+
+  /* Caption e testo secondario */
+  .stCaption, [data-testid="stCaptionContainer"] p {
+    color: #94a3b8 !important;
+    font-size: 12px !important;
+  }
+
+  /* Titoli markdown */
+  h1, h2, h3, h4 { color: #f1f5f9 !important; }
+  p { color: #e2e8f0 !important; }
+
+  /* Metriche */
+  [data-testid="metric-container"] {
+    background: #181c24 !important;
+    border: 1px solid #252a35 !important;
+    border-radius: 10px !important;
+    padding: 12px !important;
+  }
+  [data-testid="metric-container"] label,
+  [data-testid="metric-container"] p,
+  [data-testid="stMetricLabel"] p,
+  [data-testid="stMetricValue"] div {
+    color: #e2e8f0 !important;
+  }
+
+  /* Alert/info/warning/success */
+  .stAlert { border-radius: 8px !important; }
+  [data-testid="stAlert"] p { color: inherit !important; }
+
+  /* Bottone primario */
+  .stButton > button {
+    background: #3b82f6 !important;
+    color: #ffffff !important;
+    border: none !important;
+    border-radius: 10px !important;
+    font-weight: 700 !important;
+    font-size: 15px !important;
+    padding: 12px 0 !important;
+    width: 100% !important;
+  }
+  .stButton > button:hover { background: #2563eb !important; }
+  .stButton > button:disabled {
+    background: #334155 !important;
+    color: #64748b !important;
+  }
+
+  /* Divider */
+  hr { border-color: #252a35 !important; }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: #0b0d10; }
+  ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+
+  /* Nasconde hamburger menu e footer */
+  #MainMenu, footer { visibility: hidden; }
+</style>
+""", unsafe_allow_html=True)
+
+
+# ── HELPERS HTML ──────────────────────────────────────────────────
+def badge(text, color):
+    return (f'<span style="background:{color}22;color:{color};'
+            f'border:1px solid {color}44;border-radius:6px;'
+            f'padding:2px 10px;font-size:11px;font-weight:700;'
+            f'letter-spacing:1px;text-transform:uppercase;">{text}</span>')
+
+def verdict_box(verdict, score):
+    col = {"GO": "#22c55e", "WAIT": "#f59e0b", "NO": "#ef4444"}.get(verdict, "#64748b")
+    label = {"GO": "✅ ENTRA", "WAIT": "⏳ ASPETTA", "NO": "🚫 NON ENTRARE"}.get(verdict, "")
+    pct = int((score / 5) * 100)
+    return f"""
+<div style="background:{col}12;border:2px solid {col};border-radius:14px;
+     padding:24px;text-align:center;margin-bottom:16px;">
+  <div style="font-size:30px;font-weight:900;color:{col};">{label}</div>
+  <div style="font-size:13px;color:#64748b;margin-top:8px;">
+    Blocchi superati: <b style="color:{col};">{score} / 5</b>
+  </div>
+  <div style="margin-top:12px;height:8px;background:#252a35;
+       border-radius:99px;overflow:hidden;">
+    <div style="width:{pct}%;height:100%;background:{col};
+         border-radius:99px;"></div>
+  </div>
+</div>"""
+
+def kv_row(label, value, color="#e2e8f0"):
+    return (f'<div style="display:flex;justify-content:space-between;'
+            f'padding:5px 0;border-bottom:1px solid #25253522;">'
+            f'<span style="color:#64748b;font-size:12px;">{label}</span>'
+            f'<span style="color:{color};font-weight:600;font-size:12px;">{value}</span>'
+            f'</div>')
+
+
+# ── PAROLE CHIAVE EVENTI CRITICI ──────────────────────────────────
 CRITICAL_KEYWORDS = [
-    "fomc",
-    "federal reserve",
-    "interest rate",
-    "rate decision",
-    "cpi",
-    "consumer price",
-    "core cpi",
-    "pce",
-    "personal consumption",
-    "nonfarm payroll",
-    "non-farm payroll",
-    "nfarm",
-    "nfp",
-    "employment",
+    "fomc", "federal reserve", "interest rate", "rate decision",
+    "cpi", "consumer price", "core cpi",
+    "pce", "personal consumption",
+    "nonfarm payroll", "nfarm", "nfp", "employment",
     "jackson hole",
-    "gdp",
-    "gross domestic",
+    "gdp", "gross domestic",
     "retail sales",
     "initial jobless",
 ]
 
 MEDIUM_KEYWORDS = [
-    "ppi",
-    "producer price",
-    "ism manufacturing",
-    "ism services",
+    "ppi", "producer price",
+    "ism manufacturing", "ism services",
     "michigan consumer",
-    "jolts",
-    "job openings",
+    "jolts", "job openings",
     "durable goods",
     "trade balance",
     "housing starts",
     "building permits",
 ]
 
+def is_critical(name):
+    n = name.lower()
+    return any(k in n for k in CRITICAL_KEYWORDS)
 
-# ============================================================
-# CSS
-# ============================================================
-
-st.markdown(
-    """
-<style>
-.stApp {
-    background-color: #0b0d10 !important;
-    color: #e2e8f0 !important;
-}
-section[data-testid="stSidebar"] {
-    background: #13161c !important;
-}
-.stApp * {
-    color: #e2e8f0 !important;
-}
-label,
-[data-testid="stWidgetLabel"],
-[data-testid="stWidgetLabel"] p,
-.stNumberInput label,
-.stNumberInput p {
-    color: #e2e8f0 !important;
-    font-weight: 700 !important;
-    font-size: 13px !important;
-}
-input,
-input[type="number"],
-.stNumberInput input {
-    background: #1e2330 !important;
-    border: 1px solid #3b82f6 !important;
-    border-radius: 6px !important;
-    color: #ffffff !important;
-    font-weight: 700 !important;
-}
-textarea {
-    background: #1e2330 !important;
-    border: 1px solid #3b4252 !important;
-    color: #e2e8f0 !important;
-}
-[data-testid="stExpander"] {
-    background: #181c24 !important;
-    border: 1px solid #252a35 !important;
-    border-radius: 10px !important;
-}
-[data-testid="stExpander"] summary,
-[data-testid="stExpander"] summary p {
-    color: #e2e8f0 !important;
-    font-weight: 700 !important;
-}
-[data-testid="metric-container"] {
-    background: #181c24 !important;
-    border: 1px solid #252a35 !important;
-    border-radius: 10px !important;
-    padding: 12px !important;
-}
-[data-testid="metric-container"] label,
-[data-testid="metric-container"] p,
-[data-testid="stMetricLabel"] p,
-[data-testid="stMetricValue"] div {
-    color: #e2e8f0 !important;
-}
-.stButton > button {
-    background: #3b82f6 !important;
-    color: #ffffff !important;
-    border: none !important;
-    border-radius: 10px !important;
-    font-weight: 700 !important;
-    min-height: 42px !important;
-}
-.stButton > button:hover {
-    background: #2563eb !important;
-}
-hr {
-    border-color: #252a35 !important;
-}
-.stCaption,
-[data-testid="stCaptionContainer"] p {
-    color: #94a3b8 !important;
-}
-h1, h2, h3, h4 {
-    color: #f1f5f9 !important;
-}
-#MainMenu, footer {
-    visibility: hidden;
-}
-</style>
-""",
-    unsafe_allow_html=True,
-)
+def is_medium(name):
+    n = name.lower()
+    return any(k in n for k in MEDIUM_KEYWORDS)
 
 
-# ============================================================
-# HELPERS
-# ============================================================
-
-def get_secret(name: str) -> str:
-    """Legge prima dagli Streamlit Secrets e poi dalle variabili ambiente."""
+# ── CALENDARIO MACRO: FETCH LIVE VIA FINNHUB ──────────────────────
+def get_finnhub_key():
+    """Legge la chiave senza mai mostrarla a video."""
     try:
-        value = st.secrets.get(name, "")
+        value = st.secrets.get("FINNHUB_API_KEY", "")
     except Exception:
         value = ""
 
     if value:
         return str(value).strip()
 
-    return os.getenv(name, "").strip()
-
-
-def is_critical(name: str) -> bool:
-    n = str(name).lower()
-    return any(k in n for k in CRITICAL_KEYWORDS)
-
-
-def is_medium(name: str) -> bool:
-    n = str(name).lower()
-    return any(k in n for k in MEDIUM_KEYWORDS)
-
-
-def safe_float(value, default=0.0):
+    # Supporta anche un eventuale secret TOML annidato:
+    # [finnhub]
+    # api_key = "..."
     try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
+        section = st.secrets.get("finnhub", {})
+        if isinstance(section, dict):
+            value = section.get("api_key", "")
+            if value:
+                return str(value).strip()
+    except Exception:
+        pass
+
+    # Fallback utile in locale / altri deploy.
+    import os
+    return os.getenv("FINNHUB_API_KEY", "").strip()
 
 
-def format_date(raw):
-    """Converte diversi formati Finnhub in YYYY-MM-DD."""
-    if raw in (None, "", "—"):
-        return "—"
-
-    # Timestamp Unix: secondi o millisecondi
-    if isinstance(raw, (int, float)):
-        try:
-            ts = float(raw)
-            if ts > 10_000_000_000:
-                ts /= 1000
-            return datetime.fromtimestamp(ts, tz=ROME_TZ).strftime("%Y-%m-%d")
-        except Exception:
-            return "—"
-
-    text = str(raw).strip()
-
-    # ISO / datetime già leggibile
-    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
-        return text[:10]
-
-    # Altri formati comuni
-    for fmt in (
-        "%Y/%m/%d",
-        "%d/%m/%Y",
-        "%m/%d/%Y",
-        "%Y-%m-%d %H:%M:%S",
-    ):
-        try:
-            return datetime.strptime(text, fmt).strftime("%Y-%m-%d")
-        except ValueError:
-            pass
-
-    return text[:10]
+def finnhub_key_status():
+    """Restituisce solo stato e lunghezza, MAI il contenuto della chiave."""
+    key = get_finnhub_key()
+    return bool(key), len(key)
 
 
-def importance_for(name, impact):
-    impact_text = str(impact).strip().lower()
-
-    if is_critical(name) or impact_text in {"high", "3", "3.0"}:
-        return 3, True
-
-    if is_medium(name) or impact_text in {"medium", "2", "2.0"}:
-        return 2, False
-
-    return 1, False
+def clear_macro_cache():
+    # La funzione non è cached: mantenuta per compatibilità con il pulsante.
+    pass
 
 
-def message_event(text, level="info"):
-    return {
-        "date": "—",
-        "name": text,
-        "importance": 3 if level == "error" else 2,
-        "critical": False,
-        "system": True,
-    }
-
-
-def macro_status():
-    """Ritorna solo informazioni diagnostiche; MAI la chiave."""
-    key = get_secret("FINNHUB_API_KEY")
-    return {
-        "present": bool(key),
-        "length": len(key),
-        "source": (
-            "Streamlit Secrets / environment"
-            if key
-            else "nessun secret trovato"
-        ),
-    }
-
-
-# ============================================================
-# FINNHUB
-# ============================================================
-
-@st.cache_data(ttl=900, show_spinner=False)
 def fetch_macro_events():
     """
-    Scarica gli eventi economici USA delle prossime 14 giornate.
+    Recupera gli eventi macro USA delle prossime 2 settimane.
 
-    La cache dura 15 minuti, ma il pulsante "Aggiorna" la cancella
-    esplicitamente. Gli errori HTTP non vengono più nascosti.
+    IMPORTANTE: nessuna cache. In questo modo, dopo aver modificato i
+    Secrets di Streamlit, la richiesta viene eseguita davvero al rerun.
+    Gli errori HTTP vengono mostrati chiaramente invece di essere confusi
+    con una chiave mancante.
     """
-    api_key = get_secret("FINNHUB_API_KEY")
+    api_key = get_finnhub_key()
 
     if not api_key:
-        return [
-            message_event(
-                "❌ FINNHUB_API_KEY non trovata. "
-                "Inseriscila nei Secrets di Streamlit con questo nome ESATTO."
-            )
-        ]
+        return [{
+            "date": "—",
+            "name": "🔑 FINNHUB_API_KEY non è visibile all'app. "
+                    "Controlla Settings → Secrets e usa esattamente "
+                    "FINNHUB_API_KEY = \"...\".",
+            "importance": 3,
+            "critical": False,
+            "system": True,
+            "error": True,
+        }]
 
     today = date.today()
-    end_date = today + timedelta(days=14)
-
-    params = {
-        "from": today.isoformat(),
-        "to": end_date.isoformat(),
-        "token": api_key,
-    }
+    end = today + timedelta(days=14)
+    url = "https://finnhub.io/api/v1/calendar/economic"
 
     try:
-        response = requests.get(
-            FINNHUB_URL,
-            params=params,
+        r = requests.get(
+            url,
+            params={
+                "from": today.isoformat(),
+                "to": end.isoformat(),
+                "token": api_key,
+            },
             timeout=15,
-            headers={"User-Agent": "IC-Scanner/2.0"},
+            headers={"User-Agent": "IC-Scanner/1.0"},
         )
     except requests.RequestException as exc:
-        return [
-            message_event(
-                f"❌ Errore di connessione a Finnhub: "
-                f"{type(exc).__name__}: {exc}",
-                "error",
-            )
-        ]
+        return [{
+            "date": "—",
+            "name": f"❌ Errore di connessione Finnhub: {type(exc).__name__}: {exc}",
+            "importance": 3,
+            "critical": False,
+            "system": True,
+            "error": True,
+        }]
 
-    if response.status_code != 200:
-        body = response.text.strip().replace("\n", " ")
-        if len(body) > 250:
-            body = body[:250] + "…"
-
-        return [
-            message_event(
-                f"❌ Finnhub HTTP {response.status_code}. "
-                f"Risposta: {body or '(vuota)'}",
-                "error",
-            )
-        ]
+    if r.status_code != 200:
+        body = r.text.strip().replace("\n", " ")
+        if len(body) > 300:
+            body = body[:300] + "…"
+        return [{
+            "date": "—",
+            "name": f"❌ Finnhub HTTP {r.status_code}: {body or '(risposta vuota)'}",
+            "importance": 3,
+            "critical": False,
+            "system": True,
+            "error": True,
+        }]
 
     try:
-        data = response.json()
+        data = r.json()
     except ValueError:
-        return [
-            message_event(
-                "❌ Finnhub ha restituito una risposta che non è JSON.",
-                "error",
-            )
-        ]
+        return [{
+            "date": "—",
+            "name": "❌ Finnhub ha restituito una risposta non JSON.",
+            "importance": 3,
+            "critical": False,
+            "system": True,
+            "error": True,
+        }]
 
-    if isinstance(data, dict):
-        items = data.get("economicCalendar", [])
-    elif isinstance(data, list):
-        items = data
-    else:
-        items = []
-
+    items = data.get("economicCalendar", []) if isinstance(data, dict) else data
     if not isinstance(items, list):
-        return [
-            message_event(
-                "❌ Formato inatteso nella risposta Finnhub.",
-                "error",
-            )
-        ]
+        return [{
+            "date": "—",
+            "name": "❌ Formato inatteso nella risposta di Finnhub.",
+            "importance": 3,
+            "critical": False,
+            "system": True,
+            "error": True,
+        }]
 
     events = []
     seen = set()
@@ -384,919 +366,567 @@ def fetch_macro_events():
             continue
 
         country = str(item.get("country", "")).upper().strip()
-        if country and country not in {"US", "USA"}:
+        if country and country not in ("US", "USA"):
             continue
 
-        name = (
-            item.get("event")
-            or item.get("name")
-            or item.get("title")
-            or ""
-        )
-        name = str(name).strip()
-
+        name = str(item.get("event", item.get("name", ""))).strip()
         if not name:
             continue
 
-        raw_date = (
-            item.get("time")
-            or item.get("date")
-            or item.get("datetime")
-            or ""
-        )
-        event_date = format_date(raw_date)
+        raw_date = item.get("time", item.get("date", ""))
+        dt = str(raw_date)[:10] if raw_date else "—"
+        impact = str(item.get("impact", "")).lower().strip()
 
-        # Se Finnhub non ci dà una data utilizzabile, non usiamo
-        # l'evento nel calendario operativo.
-        if event_date == "—":
-            continue
+        if is_critical(name) or impact in ("high", "3"):
+            importance, critical = 3, True
+        elif is_medium(name) or impact in ("medium", "2"):
+            importance, critical = 2, False
+        else:
+            # Manteniamo anche gli eventi low: il calendario deve essere
+            # completo; la UI li mostra semplicemente come informativi.
+            importance, critical = 1, False
 
-        impact = item.get("impact", "")
-        importance, critical = importance_for(name, impact)
-
-        # L'app serve per gli eventi rilevanti all'IC:
-        # conserviamo medium/high e keyword critiche.
-        if importance < 2:
-            continue
-
-        key = (event_date, name.lower())
+        key = (dt, name)
         if key in seen:
             continue
         seen.add(key)
-
-        events.append(
-            {
-                "date": event_date,
-                "name": name,
-                "importance": importance,
-                "critical": critical,
-                "system": False,
-                "country": country or "US",
-            }
-        )
+        events.append({
+            "date": dt,
+            "name": name,
+            "importance": importance,
+            "critical": critical,
+            "system": False,
+        })
 
     events.sort(key=lambda x: (x["date"], -x["importance"], x["name"]))
 
     if not events:
-        return [
-            message_event(
-                "⚠ Finnhub ha risposto correttamente, ma non risultano "
-                "eventi USA medium/high nelle prossime 2 settimane."
-            )
-        ]
+        return [{
+            "date": "—",
+            "name": "⚠ Finnhub ha risposto correttamente, ma non ha restituito eventi USA nel periodo richiesto.",
+            "importance": 2,
+            "critical": False,
+            "system": True,
+            "error": False,
+        }]
 
     return events
 
 
-# ============================================================
-# DETERMINISTIC ANALYSIS
-# ============================================================
+# ── ANALISI AI ────────────────────────────────────────────────────
+def parse_robust(raw):
+    s = raw.strip().replace("```json", "").replace("```", "").strip()
+    try:
+        return json.loads(s)
+    except Exception:
+        pass
+    # Bilanciamento parentesi
+    depth, start, end = 0, -1, -1
+    for i, c in enumerate(s):
+        if c == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    if start != -1 and end != -1:
+        try:
+            return json.loads(s[start:end + 1])
+        except Exception:
+            pass
+    # Patch JSON troncato
+    opens  = s.count("{")
+    closes = s.count("}")
+    patched = s
+    if opens > closes:
+        patched += "}" * (opens - closes)
+    try:
+        return json.loads(patched)
+    except Exception:
+        return None
 
-def calculate_blocks(vol_data, macro_events, tnx, tnx_var, vix):
-    b1_indices = {}
 
-    for idx, data in vol_data.items():
-        iv = safe_float(data.get("iv"))
-        hv = safe_float(data.get("hv"))
-        ivr = safe_float(data.get("ivr"))
-        ivp = safe_float(data.get("ivp"))
+def run_analysis(vol_data, macro_events, tnx, tnx_var, vix, note):
+    api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        st.error("⚠ Chiave API Anthropic non configurata. Aggiungila nei Secrets di Streamlit.")
+        return None
 
-        passed = ivr > 50 and iv >= hv
+    client = anthropic.Anthropic(api_key=api_key)
 
-        b1_indices[idx] = {
-            "pass": passed,
-            "ivr": round(ivr, 2),
-            "ivp": round(ivp, 2),
-            "iv": round(iv, 2),
-            "hv": round(hv, 2),
-        }
+    today = datetime.now(ZoneInfo("Europe/Rome")).strftime("%A %d %B %Y")
 
-    candidates = [
-        idx for idx, d in vol_data.items()
-        if safe_float(d.get("ivr")) > 50
-        and safe_float(d.get("iv")) >= safe_float(d.get("hv"))
-    ]
+    # ── VETO PRE-AI: calcola blocchi critici in Python ────────────
+    # B1: almeno un indice con IVR>50 E iv>=hv
+    b1_pass = any(
+        float(d.get("ivr", 0)) > 50 and float(d.get("iv", 0)) >= float(d.get("hv", 0))
+        for d in vol_data.values()
+        if d.get("ivr")
+    )
 
-    b1_pass = bool(candidates)
-
-    real_events = [
+    # B2: nessun evento critico nelle prossime 2 settimane
+    real_critical = [
         e for e in macro_events
-        if not e.get("system") and e.get("date") != "—"
+        if e.get("critical", False) and e.get("date", "—") != "—"
     ]
+    b2_pass = len(real_critical) == 0
 
-    critical_events = [
-        e for e in real_events
-        if e.get("critical", False)
-    ]
-
-    # Gli errori di Finnhub NON vengono interpretati come "nessun evento".
-    macro_has_error = any(e.get("system") for e in macro_events)
-
-    b2_pass = not critical_events and not macro_has_error
+    # B3: TNX < 4.5 e variazione < 0.15
     b3_pass = tnx < 4.5 and abs(tnx_var) < 0.15
+
+    # B5: VIX < 20
     b5_pass = vix < 20
 
-    # B4 non può essere realmente calcolato senza catena opzioni.
-    # Per evitare di inventare dati, lo lasciamo "non verificato".
-    b4_pass = False
-
-    return {
-        "B1_volatility": {
-            "pass": b1_pass,
-            "best": max(
-                candidates,
-                key=lambda x: safe_float(vol_data[x].get("ivr")),
-                default=None,
-            ),
-            "note": (
-                "Almeno un indice ha IVR > 50 e IV ≥ HV."
-                if b1_pass
-                else "Nessun indice ha contemporaneamente IVR > 50 e IV ≥ HV."
-            ),
-            "indices": b1_indices,
-        },
-        "B2_macro": {
-            "pass": b2_pass,
-            "events": [
-                f"{e['date']} — {e['name']}"
-                for e in critical_events
-            ],
-            "note": (
-                "Nessun evento critico e nessun errore calendario."
-                if b2_pass
-                else (
-                    "Sono presenti eventi critici."
-                    if critical_events
-                    else "Calendario macro non verificabile."
-                )
-            ),
-        },
-        "B3_yields": {
-            "pass": b3_pass,
-            "tnx": round(tnx, 2),
-            "change3d": round(tnx_var, 2),
-            "note": (
-                "TNX sotto 4.50% e variazione 3gg < 0.15%."
-                if b3_pass
-                else "Condizione TNX non soddisfatta."
-            ),
-        },
-        "B4_structure": {
-            "pass": b4_pass,
-            "note": (
-                "Non verificato: servono DTE e delta reali della catena "
-                "opzioni."
-            ),
-        },
-        "B5_trend": {
-            "pass": b5_pass,
-            "vix": round(vix, 1),
-            "trending": None,
-            "note": (
-                "VIX sotto 20."
-                if b5_pass
-                else "VIX ≥ 20."
-            ),
-        },
-    }
-
-
-def deterministic_result(vol_data, macro_events, tnx, tnx_var, vix):
-    """
-    Analisi locale, senza AI.
-    Non inventa strike, DTE o delta.
-    """
-    blocks = calculate_blocks(vol_data, macro_events, tnx, tnx_var, vix)
-
-    passes = sum(
-        bool(blocks[key]["pass"])
-        for key in blocks
-    )
-
-    veto = (
-        not blocks["B1_volatility"]["pass"]
-        or not blocks["B2_macro"]["pass"]
-    )
-
-    if veto:
-        verdict = "NO"
-    elif passes == 5:
-        verdict = "GO"
-    elif passes >= 3:
-        verdict = "WAIT"
-    else:
-        verdict = "NO"
-
-    reasons = []
-
-    if not blocks["B1_volatility"]["pass"]:
-        reasons.append("B1 non passa")
-    if not blocks["B2_macro"]["pass"]:
-        reasons.append("B2 non passa")
-    if not blocks["B3_yields"]["pass"]:
-        reasons.append("B3 non passa")
-    if not blocks["B4_structure"]["pass"]:
-        reasons.append("B4 non verificabile senza chain")
-    if not blocks["B5_trend"]["pass"]:
-        reasons.append("B5 non passa")
-
-    motivation = "; ".join(reasons)
-
-    return {
-        "verdict": verdict,
-        "score": passes,
-        "blocks": blocks,
-        "setup": None,
-        "motivation": motivation or "Tutti i blocchi verificati passano.",
-        "assignment_risk": (
-            "XSP/XND/RUTW: le opzioni sugli indici sono cash-settled "
-            "e di stile europeo; verifica sempre il contratto specifico."
-        ),
-        "source": "analisi locale deterministica",
-    }
-
-
-# ============================================================
-# OPTIONAL ANTHROPIC ANALYSIS
-# ============================================================
-
-def parse_json_response(raw):
-    text = str(raw).strip()
-
-    if text.startswith("```"):
-        text = text.replace("```json", "").replace("```", "").strip()
-
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start >= 0 and end > start:
-            try:
-                return json.loads(text[start:end + 1])
-            except json.JSONDecodeError:
-                return None
-
-    return None
-
-
-def run_ai_analysis(vol_data, macro_events, tnx, tnx_var, vix, note):
-    if anthropic is None:
-        return None, "Pacchetto 'anthropic' non installato."
-
-    api_key = get_secret("ANTHROPIC_API_KEY")
-
-    if not api_key:
-        return None, (
-            "ANTHROPIC_API_KEY non configurata. "
-            "Puoi usare comunque l'analisi locale."
+    # ── VETO ASSOLUTO ─────────────────────────────────────────────
+    # Se B1 o B2 falliscono → NO. Sempre. Senza eccezioni.
+    veto_triggered = not b1_pass or not b2_pass
+    veto_reason    = []
+    if not b1_pass:
+        veto_reason.append("B1 FALLISCE: nessun indice ha IVR>50 e IV≥HV")
+    if not b2_pass:
+        events_str = ", ".join(
+            f"{e['date']} {e['name']}" for e in real_critical[:3]
         )
+        veto_reason.append(f"B2 FALLISCE: eventi critici in calendario ({events_str})")
 
-    local = deterministic_result(
-        vol_data, macro_events, tnx, tnx_var, vix
-    )
-
-    macro_text = "\n".join(
-        f"- {e['date']}: {e['name']}"
-        for e in macro_events
-        if not e.get("system")
-    ) or "Nessun evento disponibile."
-
-    vol_text = "\n".join(
-        f"- {idx}: IV={d['iv']} HV={d['hv']} "
-        f"IVR={d['ivr']} IVP={d['ivp']} prezzo={d['price']}"
+    vol_summary = "\n".join([
+        f"  {idx}: IV={d['iv']}% HV={d['hv']}% IVR={d['ivr']}% "
+        f"IVP={d['ivp']}% Prezzo={d.get('price', 'n/d')}"
         for idx, d in vol_data.items()
-    )
+        if d.get("ivr")
+    ])
 
-    system = """
-Sei un assistente tecnico per l'analisi di Iron Condor su indici.
+    macro_summary = "\n".join([
+        f"  {e['date']} — {e['name']} {'⚠ CRITICO' if e.get('critical') else ''}"
+        for e in macro_events[:10]
+        if e.get("date", "—") != "—"
+    ]) or "  Nessun evento rilevato"
 
-IMPORTANTE:
-- Non inventare strike, DTE, delta, credito o prezzi.
-- Se non hai una vera option chain, lascia setup=null.
-- Devi rispettare i blocchi calcolati in Python.
-- Se B1 o B2 sono false, verdict deve essere NO.
-- Rispondi SOLO con JSON valido.
+    prompt = f"""Oggi è {today}.
 
-Schema:
-{
-  "verdict": "GO|WAIT|NO",
-  "score": 0,
-  "motivation": "string",
-  "blocks": {},
-  "setup": null,
-  "assignment_risk": "string"
-}
-"""
+DATI REALI DI VOLATILITÀ (usali ESATTAMENTE nel blocco B1, non inventare):
+{vol_summary}
 
-    prompt = f"""
-DATI VOLATILITÀ:
-{vol_text}
+EVENTI MACRO PROSSIME 2 SETTIMANE:
+{macro_summary}
 
-CALENDARIO MACRO:
-{macro_text}
+VALUTAZIONE PRE-CALCOLATA (VINCOLANTE — non puoi ignorarla):
+  B1 passa: {b1_pass}
+  B2 passa: {b2_pass} {'— VETO ATTIVO: eventi critici presenti' if not b2_pass else ''}
+  B3 passa: {b3_pass}
+  B5 passa: {b5_pass}
+  VETO ASSOLUTO ATTIVO: {veto_triggered}
+  {'MOTIVO VETO: ' + ' | '.join(veto_reason) if veto_triggered else ''}
 
-TNX: {tnx}%
-Variazione TNX 3 giorni: {tnx_var:+.2f}%
-VIX: {vix}
-NOTE OPERATORE: {note or "nessuna"}
+DATI AGGIUNTIVI:
+  Treasury 10Y (TNX): {tnx}%
+  Variazione TNX ultimi 3 giorni: {tnx_var:+.2f}%
+  VIX: {vix}
+{f"  Note operatore: {note}" if note else ""}
 
-BLOCCHI CALCOLATI IN PYTHON:
-{json.dumps(local["blocks"], ensure_ascii=False)}
+{'ISTRUZIONE VINCOLANTE: il veto è attivo. verdict DEVE essere NO. Non scrivere GO o WAIT.' if veto_triggered else ''}
+Analizza e rispondi SOLO con JSON."""
 
-VERDICT LOCALE:
-{local["verdict"]}
+    system = """Sei un assistente per opzioni finanziarie. Rispondi SOLO con JSON puro, no markdown, no backtick.
 
-Non creare dati di option chain che non sono stati forniti.
-"""
+REGOLE DI VETO ASSOLUTE — queste hanno priorità su tutto:
+  - Se B2_pass=false nel prompt (eventi FOMC/CPI/NFP/Jackson Hole presenti): verdict = "NO" OBBLIGATORIO
+  - Se B1_pass=false nel prompt (nessun indice con IVR>50 e IV>=hv): verdict = "NO" OBBLIGATORIO
+  - Se VETO ASSOLUTO ATTIVO=True nel prompt: verdict = "NO" OBBLIGATORIO, SEMPRE
+  - Non esiste nessuna combinazione di altri blocchi che possa produrre GO se il veto è attivo
+
+REGOLE NORMALI (solo se veto non attivo):
+  B1 pass = almeno un indice ha IVR>50 E iv>=hv
+  B2 pass = nessun evento FOMC/CPI/NFP/Jackson Hole nella lista
+  B3 pass = tnx < 4.5 E variazione 3gg < 0.15
+  B4 pass = esiste setup valido con DTE 21-30 e delta 0.15-0.20 sulle short
+  B5 pass = vix < 20 E no trend forte
+  GO solo se tutti e 5 i blocchi passano.
+  WAIT se 3-4 blocchi passano.
+  NO se meno di 3 blocchi passano O se veto attivo.
+
+DELTA: gli strike short del setup devono essere a delta 0.15-0.20.
+  Aggiungi nel setup: "put_short_delta" e "call_short_delta" (valori tra 0.15 e 0.20).
+
+Note MAX 60 caratteri. Motivation MAX 300 caratteri.
+Struttura JSON esatta:
+{"verdict":"NO","score":1,"blocks":{"B1_volatility":{"pass":false,"best":"XND","note":"IVR ok ma IV sotto HV","indices":{"XSP":{"pass":false,"ivr":14.02,"ivp":10,"iv":12.10,"hv":12.23},"XND":{"pass":false,"ivr":60.78,"ivp":40,"iv":19.22,"hv":22.27},"RUTW":{"pass":false,"ivr":45,"ivp":35,"iv":16.5,"hv":18.2}}},"B2_macro":{"pass":false,"events":["11 set CPI","16 set FOMC"],"note":"CPI e FOMC presenti — veto attivo"},"B3_yields":{"pass":true,"tnx":4.21,"change3d":0.06,"note":"TNX stabile"},"B4_structure":{"pass":true,"dte_ok":true,"credit_ok":true,"note":"DTE 28gg delta 0.17"},"B5_trend":{"pass":true,"vix":15.2,"trending":false,"note":"mercato laterale"}},"setup":{"underlying":"XND","expiration":"2026-09-18","dte":28,"put_short":280,"put_short_delta":0.17,"put_long":270,"call_short":310,"call_short_delta":0.16,"call_long":320,"credit":380,"max_loss":620,"breakeven_low":276.2,"breakeven_high":313.8,"tp_target":190,"sl_trigger":760},"motivation":"VETO: CPI 11 set e FOMC 16 set nelle prossime 2 settimane. Non aprire IC. Aspetta dopo il 16 settembre.","assignment_risk":"Zero — European-style cash-settled."}"""
 
     try:
-        client = anthropic.Anthropic(api_key=api_key)
-
-        response = client.messages.create(
-            model=ANTHROPIC_MODEL,
-            max_tokens=1800,
+        msg = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=2000,
             system=system,
-            messages=[
-                {"role": "user", "content": prompt}
-            ],
+            messages=[{"role": "user", "content": prompt}],
         )
+        raw = msg.content[0].text
+        result = parse_robust(raw)
 
-        parts = []
-        for block in getattr(response, "content", []):
-            text = getattr(block, "text", None)
-            if text:
-                parts.append(text)
+        # ── OVERRIDE DI SICUREZZA IN PYTHON ──────────────────────
+        # Se il modello ha ignorato il veto, lo forziamo qui
+        if result and veto_triggered:
+            if result.get("verdict") in ("GO", "WAIT"):
+                result["verdict"] = "NO"
+                result["score"]   = min(result.get("score", 0),
+                                        sum([b3_pass, b5_pass]))
+                result["motivation"] = (
+                    "⛔ VETO AUTOMATICO: " + " | ".join(veto_reason) +
+                    ". Non aprire Iron Condor finché questi blocchi non passano."
+                )
+                # Forza B2 a false se ci sono eventi critici
+                if not b2_pass and "B2_macro" in result.get("blocks", {}):
+                    result["blocks"]["B2_macro"]["pass"] = False
+                    result["blocks"]["B2_macro"]["events"] = [
+                        f"{e['date']} — {e['name']}"
+                        for e in real_critical[:5]
+                    ]
+                    result["blocks"]["B2_macro"]["note"] = (
+                        "VETO: eventi critici presenti"
+                    )
 
-        raw = "\n".join(parts)
-        result = parse_json_response(raw)
+        return result
 
-        if not isinstance(result, dict):
-            return None, "Anthropic ha restituito un JSON non valido."
-
-        # Veto locale: il modello non può sovrascriverlo.
-        if not local["blocks"]["B1_volatility"]["pass"] or not local["blocks"]["B2_macro"]["pass"]:
-            result["verdict"] = "NO"
-
-        result["blocks"] = local["blocks"]
-        result["source"] = "Anthropic + controlli locali"
-
-        return result, None
-
-    except Exception as exc:
-        return None, f"Errore Anthropic: {type(exc).__name__}: {exc}"
+    except Exception as e:
+        st.error(f"Errore API: {e}")
+        return None
 
 
-# ============================================================
-# UI HELPERS
-# ============================================================
+# ════════════════════════════════════════════════════════════════
+# UI PRINCIPALE
+# ════════════════════════════════════════════════════════════════
 
-def verdict_box(verdict, score, total=5):
-    colors = {
-        "GO": "#22c55e",
-        "WAIT": "#f59e0b",
-        "NO": "#ef4444",
-    }
-    labels = {
-        "GO": "✅ ENTRA",
-        "WAIT": "⏳ ASPETTA",
-        "NO": "🚫 NON ENTRARE",
-    }
-
-    color = colors.get(verdict, "#64748b")
-    label = labels.get(verdict, verdict)
-    pct = max(0, min(100, int(score / total * 100)))
-
-    return f"""
-<div style="
-    background:{color}12;
-    border:2px solid {color};
-    border-radius:14px;
-    padding:24px;
-    text-align:center;
-    margin-bottom:16px;">
-    <div style="font-size:30px;font-weight:900;color:{color};">
-        {label}
-    </div>
-    <div style="font-size:13px;margin-top:8px;">
-        Blocchi superati: <b>{score} / {total}</b>
-    </div>
-    <div style="
-        margin-top:12px;
-        height:8px;
-        background:#252a35;
-        border-radius:99px;
-        overflow:hidden;">
-        <div style="
-            width:{pct}%;
-            height:100%;
-            background:{color};
-            border-radius:99px;">
-        </div>
-    </div>
+# ── HEADER ───────────────────────────────────────────────────────
+st.markdown("""
+<div style="background:#13161c;border-bottom:1px solid #252a35;
+     padding:16px 4px;margin-bottom:20px;">
+  <div style="font-size:22px;font-weight:900;color:#e2e8f0;">
+    📊 IC Scanner
+  </div>
+  <div style="font-size:12px;color:#64748b;margin-top:2px;">
+    Iron Condor · XSP · XND · RUTW · European-style
+  </div>
 </div>
-"""
+""", unsafe_allow_html=True)
 
 
-def kv_row(label, value):
-    return f"""
-<div style="
-    display:flex;
-    justify-content:space-between;
-    gap:15px;
-    padding:6px 0;
-    border-bottom:1px solid #25253522;">
-    <span style="font-size:12px;color:#94a3b8;">{html.escape(str(label))}</span>
-    <span style="font-weight:700;font-size:12px;text-align:right;">
-        {html.escape(str(value))}
-    </span>
-</div>
-"""
-
-
-# ============================================================
-# HEADER
-# ============================================================
-
-st.markdown(
-    """
-<div style="
-    background:#13161c;
-    border-bottom:1px solid #252a35;
-    padding:16px 4px;
-    margin-bottom:20px;">
-    <div style="font-size:22px;font-weight:900;">
-        📊 IC Scanner
-    </div>
-    <div style="font-size:12px;color:#94a3b8;margin-top:2px;">
-        Iron Condor · XSP · XND · RUTW · macro calendar
-    </div>
-</div>
-""",
-    unsafe_allow_html=True,
-)
-
-
-# ============================================================
-# SECRETS DIAGNOSTICS
-# ============================================================
-
-with st.expander("⚙️ Stato collegamenti API", expanded=False):
-    fh = macro_status()
-
-    if fh["present"]:
-        st.success(
-            f"Finnhub: ✅ SECRET TROVATO · lunghezza chiave: {fh['length']}"
-        )
-    else:
-        st.error(
-            "Finnhub: ❌ FINNHUB_API_KEY NON TROVATA. "
-            "Il nome del Secret deve essere esattamente FINNHUB_API_KEY."
-        )
-
-    anthropic_key = get_secret("ANTHROPIC_API_KEY")
-    if anthropic_key:
-        st.success(
-            f"Anthropic: ✅ SECRET TROVATO · lunghezza chiave: "
-            f"{len(anthropic_key)}"
-        )
-    else:
-        st.info(
-            "Anthropic: ⚪ non configurata. "
-            "L'analisi locale continua a funzionare."
-        )
-
-    st.caption(
-        "Per sicurezza la chiave non viene mai visualizzata."
-    )
-
-
-# ============================================================
-# VOLATILITY
-# ============================================================
-
+# ── SEZIONE 1: DATI DI VOLATILITÀ ────────────────────────────────
 st.markdown("### 📋 Dati di Volatilità")
-st.caption(
-    "Inserisci i dati che vuoi usare per la valutazione. "
-    "I valori non vengono recuperati automaticamente."
-)
+st.caption("Copia i valori esatti che vedi su Barchart.com per ciascun indice.")
 
 vol_data = {}
+INDICES = {
+    "XSP":  "S&P 500 Mini ($XSP)",
+    "XND":  "Nasdaq 100 Mini ($XND)",
+    "RUTW": "Russell 2000 ($RUT / RUTW)",
+}
 
 for idx, label in INDICES.items():
     with st.expander(f"**{idx}** — {label}", expanded=True):
-        c1, c2, c3, c4, c5 = st.columns(5)
-
-        iv = c1.number_input(
-            "IV (%)",
-            min_value=0.0,
-            max_value=100.0,
-            value=0.0,
-            step=0.01,
-            format="%.2f",
-            key=f"{idx}_iv",
-        )
-        hv = c2.number_input(
-            "HV (%)",
-            min_value=0.0,
-            max_value=100.0,
-            value=0.0,
-            step=0.01,
-            format="%.2f",
-            key=f"{idx}_hv",
-        )
-        ivr = c3.number_input(
-            "IVR (%)",
-            min_value=0.0,
-            max_value=100.0,
-            value=0.0,
-            step=0.01,
-            format="%.2f",
-            key=f"{idx}_ivr",
-        )
-        ivp = c4.number_input(
-            "IVP (%)",
-            min_value=0.0,
-            max_value=100.0,
-            value=0.0,
-            step=0.01,
-            format="%.2f",
-            key=f"{idx}_ivp",
-        )
-        price = c5.number_input(
-            "Prezzo",
-            min_value=0.0,
-            max_value=99999.0,
-            value=0.0,
-            step=0.01,
-            format="%.2f",
-            key=f"{idx}_price",
-        )
+        col1, col2, col3, col4, col5 = st.columns(5)
+        iv    = col1.number_input("IV (%)",    min_value=0.0, max_value=100.0,
+                                  value=0.0, step=0.01, key=f"{idx}_iv",
+                                  format="%.2f")
+        hv    = col2.number_input("HV (%)",    min_value=0.0, max_value=100.0,
+                                  value=0.0, step=0.01, key=f"{idx}_hv",
+                                  format="%.2f")
+        ivr   = col3.number_input("IVR (%)",   min_value=0.0, max_value=100.0,
+                                  value=0.0, step=0.01, key=f"{idx}_ivr",
+                                  format="%.2f")
+        ivp   = col4.number_input("IVP (%)",   min_value=0.0, max_value=100.0,
+                                  value=0.0, step=0.01, key=f"{idx}_ivp",
+                                  format="%.2f")
+        price = col5.number_input("Prezzo",    min_value=0.0, max_value=99999.0,
+                                  value=0.0, step=0.01, key=f"{idx}_price",
+                                  format="%.2f")
 
         vol_data[idx] = {
-            "iv": round(iv, 2),
-            "hv": round(hv, 2),
-            "ivr": round(ivr, 2),
-            "ivp": round(ivp, 2),
+            "iv": round(iv, 2), "hv": round(hv, 2),
+            "ivr": round(ivr, 2), "ivp": round(ivp, 2),
             "price": round(price, 2),
         }
 
+        # Mini feedback immediato
         if ivr > 0:
-            if ivr > 50 and iv >= hv:
-                st.success("✓ B1 PASSA — IVR > 50 e IV ≥ HV")
-            else:
-                problems = []
-                if ivr <= 50:
-                    problems.append("IVR ≤ 50")
-                if iv < hv:
-                    problems.append("IV < HV")
-                st.warning("✗ B1 non passa — " + " · ".join(problems))
-
+            passes = ivr > 50 and iv >= hv
+            col_ok = "#22c55e" if passes else "#ef4444"
+            msg = "✓ PASSA (IVR>50 e IV≥HV)" if passes else \
+                  f"✗ NON PASSA — {'IVR<50' if ivr <= 50 else ''}" \
+                  f"{'e ' if ivr <= 50 and iv < hv else ''}{'IV<HV' if iv < hv else ''}"
+            st.markdown(
+                f'<div style="font-size:11px;color:{col_ok};'
+                f'font-weight:700;margin-top:4px;">{msg}</div>',
+                unsafe_allow_html=True
+            )
 
 st.divider()
 
 
-# ============================================================
-# MARKET DATA
-# ============================================================
-
+# ── SEZIONE 2: DATI AGGIUNTIVI B3 e B5 ───────────────────────────
 st.markdown("### 📈 Dati di Mercato Aggiuntivi")
-st.caption("Inserisci TNX e VIX manualmente.")
+st.caption("Cerca TNX e VIX su IBKR o su finance.yahoo.com")
 
 c1, c2, c3 = st.columns(3)
+tnx     = c1.number_input("Treasury 10Y — TNX (%)", min_value=0.0,
+                           max_value=20.0, value=4.25, step=0.01, format="%.2f")
+tnx_var = c2.number_input("Variazione TNX 3 giorni (%)", min_value=-5.0,
+                           max_value=5.0, value=0.0, step=0.01, format="%.2f")
+vix     = c3.number_input("VIX", min_value=0.0,
+                           max_value=100.0, value=15.0, step=0.1, format="%.1f")
 
-tnx = c1.number_input(
-    "Treasury 10Y — TNX (%)",
-    min_value=0.0,
-    max_value=20.0,
-    value=4.25,
-    step=0.01,
-    format="%.2f",
-)
-
-tnx_var = c2.number_input(
-    "Variazione TNX 3 giorni (%)",
-    min_value=-5.0,
-    max_value=5.0,
-    value=0.0,
-    step=0.01,
-    format="%.2f",
-)
-
-vix = c3.number_input(
-    "VIX",
-    min_value=0.0,
-    max_value=100.0,
-    value=15.0,
-    step=0.1,
-    format="%.1f",
-)
-
+# Feedback immediato B3 e B5
+c1b, c2b = st.columns(2)
 tnx_ok = tnx < 4.5 and abs(tnx_var) < 0.15
 vix_ok = vix < 20
-
-c1b, c2b = st.columns(2)
-
-c1b.success("B3 ✓ TNX ok") if tnx_ok else c1b.warning("B3 ✗ TNX fuori criterio")
-c2b.success("B5 ✓ VIX ok") if vix_ok else c2b.warning("B5 ⚠ VIX elevato")
+c1b.markdown(
+    f'<div style="font-size:11px;color:{"#22c55e" if tnx_ok else "#ef4444"};'
+    f'font-weight:700;">B3: {"✓ TNX ok" if tnx_ok else "✗ TNX critico"}</div>',
+    unsafe_allow_html=True
+)
+c2b.markdown(
+    f'<div style="font-size:11px;color:{"#22c55e" if vix_ok else "#f59e0b"};'
+    f'font-weight:700;">B5: {"✓ VIX ok" if vix_ok else "⚠ VIX elevato"}</div>',
+    unsafe_allow_html=True
+)
 
 st.divider()
 
 
-# ============================================================
-# MACRO CALENDAR
-# ============================================================
+# ── SEZIONE 3: CALENDARIO MACRO ───────────────────────────────────
+st.markdown("### 📅 Calendario Macro (prossime 2 settimane)")
 
-st.markdown("### 📅 Calendario Macro — prossime 2 settimane")
+key_present, key_len = finnhub_key_status()
+c_status, c_refresh = st.columns([3, 1])
+if key_present:
+    c_status.success(f"🟢 Finnhub collegato — chiave rilevata ({key_len} caratteri)")
+else:
+    c_status.error("🔴 Finnhub non configurato: FINNHUB_API_KEY non visibile all'app")
 
-r1, r2 = st.columns([3, 1])
+if c_refresh.button("🔄 Aggiorna", key="refresh_macro"):
+    st.rerun()
 
-with r1:
-    st.caption(
-        "Fonte: Finnhub. Sono mostrati gli eventi USA classificati "
-        "medium/high o riconosciuti come critici."
-    )
-
-with r2:
-    if st.button("🔄 Aggiorna", key="refresh_macro"):
-        fetch_macro_events.clear()
-        st.rerun()
-
-with st.spinner("Controllo calendario Finnhub..."):
+with st.spinner("Scarico eventi macro..."):
     macro_events = fetch_macro_events()
 
-system_events = [e for e in macro_events if e.get("system")]
-real_events = [e for e in macro_events if not e.get("system")]
+if macro_events:
+    critical_found = []
+    real_events    = [e for e in macro_events if e.get("date", "—") != "—"]
+    info_events    = [e for e in macro_events if e.get("date", "—") == "—"]
 
-for event in system_events:
-    if "❌" in event["name"]:
-        st.error(event["name"])
-    else:
-        st.warning(event["name"])
+    # Messaggi di sistema (chiave mancante, errori)
+    for e in info_events:
+        if e.get("error"):
+            st.error(e.get("name", ""))
+        else:
+            st.info(e.get("name", ""))
 
-critical_found = []
-
-for event in real_events:
-    critical = event.get("critical", False)
-    importance = event.get("importance", 1)
-
-    icon = "🔴" if critical else "🟡"
-    color = "#ef4444" if critical else "#f59e0b"
-
-    st.markdown(
-        f"""
-<div style="
-    padding:7px 0;
-    border-bottom:1px solid #25253533;">
-    {icon}
-    <span style="color:{color};font-size:12px;">
-        <b>{html.escape(str(event['date']))}</b>
-        — {html.escape(str(event['name']))}
-    </span>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
-    if critical:
-        critical_found.append(event["name"])
-
-if real_events:
-    if critical_found:
-        st.warning(
-            f"⚠ {len(critical_found)} evento/i critico/i rilevato/i. "
-            "B2 non passa."
+    # Eventi reali
+    for e in real_events:
+        name      = e.get("name", "")
+        dt        = e.get("date", "")
+        crit      = e.get("critical", False)
+        imp       = e.get("importance", 1)
+        col_e     = "#ef4444" if crit else "#f59e0b" if imp >= 2 else "#64748b"
+        icon      = "🔴" if crit else "🟡" if imp >= 2 else "⚪"
+        st.markdown(
+            f'<div style="padding:5px 0;border-bottom:1px solid #25253533;">'
+            f'{icon} <span style="color:{col_e};font-size:12px;">'
+            f'<b>{dt}</b> — {name}</span></div>',
+            unsafe_allow_html=True
         )
-    else:
-        st.success("✅ Nessun evento critico rilevato. B2 passa.")
+        if crit:
+            critical_found.append(name)
+
+    if real_events:
+        if critical_found:
+            st.warning(
+                f"⚠ **{len(critical_found)} evento/i critico/i** nelle prossime 2 settimane "
+                f"— B2 probabilmente FALLISCE. Valuta se aspettare."
+            )
+        else:
+            st.success("✅ Nessun evento critico rilevato — B2 dovrebbe passare.")
+else:
+    st.info("Nessun evento recuperato.")
 
 st.divider()
 
 
-# ============================================================
-# NOTES
-# ============================================================
-
+# ── SEZIONE 4: NOTE E ANALISI ─────────────────────────────────────
 note = st.text_area(
-    "📝 Note aggiuntive",
-    placeholder=(
-        "Es.: VIX in salita, mercato nervoso, evento già prezzato..."
-    ),
-    height=80,
+    "📝 Note aggiuntive (opzionale)",
+    placeholder="Es: VIX in salita stamattina, mercato nervoso dopo Fed...",
+    height=70,
 )
 
-has_data = any(
-    safe_float(d.get("ivr")) > 0
-    for d in vol_data.values()
-)
-
+# Check dati minimi
+has_data = any(d.get("ivr", 0) > 0 for d in vol_data.values())
 if not has_data:
-    st.info(
-        "Inserisci almeno IVR per uno degli indici per attivare l'analisi."
-    )
+    st.warning("⚠ Inserisci almeno IV, HV e IVR per uno degli indici prima di analizzare.")
 
+if st.button("🔍 ANALIZZA CON DATI REALI", disabled=not has_data):
 
-# ============================================================
-# ANALYSIS BUTTONS
-# ============================================================
+    with st.spinner("Analisi AI in corso..."):
+        result = run_analysis(vol_data, macro_events, tnx, tnx_var, vix, note)
 
-st.markdown("### 🔍 Analisi")
+    if result:
+        st.markdown("---")
+        st.markdown("## Risultato Analisi")
 
-local_button = st.button(
-    "📊 ANALISI LOCALE — senza API Anthropic",
-    disabled=not has_data,
-    use_container_width=True,
-)
-
-ai_available = bool(get_secret("ANTHROPIC_API_KEY")) and anthropic is not None
-
-ai_button = st.button(
-    "🤖 ANALIZZA CON ANTHROPIC",
-    disabled=not has_data or not ai_available,
-    use_container_width=True,
-)
-
-if not ai_available:
-    st.caption(
-        "Il pulsante Anthropic si attiva quando ANTHROPIC_API_KEY è "
-        "presente e il pacchetto anthropic è installato."
-    )
-
-
-# ============================================================
-# SHOW RESULT
-# ============================================================
-
-result = None
-
-if local_button:
-    with st.spinner("Calcolo locale..."):
-        result = deterministic_result(
-            vol_data,
-            macro_events,
-            tnx,
-            tnx_var,
-            vix,
-        )
-
-elif ai_button:
-    with st.spinner("Analisi Anthropic..."):
-        result, error = run_ai_analysis(
-            vol_data,
-            macro_events,
-            tnx,
-            tnx_var,
-            vix,
-            note,
-        )
-
-    if error:
-        st.error(error)
-
-
-if result:
-    st.markdown("---")
-    st.markdown("## Risultato")
-
-    verdict = result.get("verdict", "NO")
-    score = int(safe_float(result.get("score", 0)))
-
-    st.markdown(
-        verdict_box(verdict, score),
-        unsafe_allow_html=True,
-    )
-
-    st.markdown("### Motivazione")
-    st.info(result.get("motivation", "—"))
-
-    blocks = result.get("blocks", {})
-
-    block_labels = {
-        "B1_volatility": "B1 — Volatilità",
-        "B2_macro": "B2 — Calendario Macro",
-        "B3_yields": "B3 — Rendimenti",
-        "B4_structure": "B4 — Struttura",
-        "B5_trend": "B5 — Contesto / VIX",
-    }
-
-    for key, label in block_labels.items():
-        block = blocks.get(key)
-
-        if not block:
-            continue
-
-        passed = bool(block.get("pass"))
-        status = "OK ✓" if passed else "NO ✗"
-
-        with st.expander(f"**{label}** — {status}", expanded=False):
-            st.write(block.get("note", ""))
-
-            if key == "B1_volatility":
-                rows = []
-
-                for idx, d in block.get("indices", {}).items():
-                    rows.append(
-                        {
-                            "Indice": idx,
-                            "IVR %": d.get("ivr", 0),
-                            "IVP %": d.get("ivp", 0),
-                            "IV %": d.get("iv", 0),
-                            "HV %": d.get("hv", 0),
-                            "B1": "OK" if d.get("pass") else "NO",
-                        }
-                    )
-
-                if rows:
-                    st.dataframe(
-                        rows,
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-
-                if block.get("best"):
-                    st.caption(
-                        f"Indice migliore per IVR: **{block['best']}**"
-                    )
-
-            elif key == "B2_macro":
-                events = block.get("events", [])
-
-                if events:
-                    for event in events:
-                        st.warning(event)
-                else:
-                    st.success("Nessun evento critico.")
-
-            elif key == "B3_yields":
-                c1, c2 = st.columns(2)
-                c1.metric(
-                    "TNX",
-                    f"{block.get('tnx', '?')}%",
-                )
-                c2.metric(
-                    "Variazione 3gg",
-                    f"{block.get('change3d', 0):+.2f}%",
-                )
-
-            elif key == "B5_trend":
-                c1, c2 = st.columns(2)
-                c1.metric(
-                    "VIX",
-                    block.get("vix", "?"),
-                )
-
-                trending = block.get("trending")
-                c2.metric(
-                    "Trend forte",
-                    "SÌ" if trending else "NO"
-                    if trending is not None
-                    else "N/D",
-                )
-
-    # Setup: visualizza SOLO dati realmente forniti dal modello.
-    setup = result.get("setup")
-
-    if verdict == "GO" and setup:
-        st.markdown("### 🎯 Setup Proposto")
-
-        rows = [
-            ("Sottostante", setup.get("underlying", "—")),
-            ("Scadenza", setup.get("expiration", "—")),
-            ("DTE", setup.get("dte", "—")),
-            ("Put short", setup.get("put_short", "—")),
-            ("Put short delta", setup.get("put_short_delta", "—")),
-            ("Put long", setup.get("put_long", "—")),
-            ("Call short", setup.get("call_short", "—")),
-            ("Call short delta", setup.get("call_short_delta", "—")),
-            ("Call long", setup.get("call_long", "—")),
-            ("Credito", setup.get("credit", "—")),
-            ("Max loss", setup.get("max_loss", "—")),
-            ("Breakeven basso", setup.get("breakeven_low", "—")),
-            ("Breakeven alto", setup.get("breakeven_high", "—")),
-        ]
-
+        # ── VERDICT ──────────────────────────────────────────────
         st.markdown(
-            '<div style="background:#181c24;border:1px solid #22c55e40;'
-            'border-radius:12px;padding:16px 20px;">'
-            + "".join(kv_row(k, v) for k, v in rows)
-            + "</div>",
-            unsafe_allow_html=True,
+            verdict_box(result.get("verdict", "NO"), result.get("score", 0)),
+            unsafe_allow_html=True
         )
-    elif verdict == "GO":
+
+        # ── MOTIVAZIONE ──────────────────────────────────────────
+        with st.container():
+            st.markdown(f"""
+<div style="background:#181c24;border:1px solid #252a35;
+     border-radius:12px;padding:14px 16px;margin-bottom:16px;">
+  <div style="font-size:10px;color:#64748b;letter-spacing:1px;
+       text-transform:uppercase;margin-bottom:8px;">Motivazione</div>
+  <div style="font-size:13px;color:#e2e8f0;line-height:1.7;">
+    {result.get("motivation", "—")}
+  </div>
+</div>""", unsafe_allow_html=True)
+
+        # ── I 5 BLOCCHI ──────────────────────────────────────────
+        blocks = result.get("blocks", {})
+        block_labels = {
+            "B1_volatility": "B1 — Volatilità per indice",
+            "B2_macro":      "B2 — Calendario Macro",
+            "B3_yields":     "B3 — Rendimenti Obbligazionari",
+            "B4_structure":  "B4 — Struttura Posizione",
+            "B5_trend":      "B5 — Contesto di Mercato",
+        }
+
+        for key, label in block_labels.items():
+            b = blocks.get(key)
+            if not b:
+                continue
+            col_b = "#22c55e" if b.get("pass") else "#ef4444"
+            stato = "OK ✓" if b.get("pass") else "NO ✗"
+
+            with st.expander(f"**{label}** — {stato}"):
+
+                st.markdown(
+                    f'<div style="font-size:12px;color:#e2e8f0;'
+                    f'margin-bottom:10px;">{b.get("note","")}</div>',
+                    unsafe_allow_html=True
+                )
+
+                # B1 — tabella indici
+                if key == "B1_volatility" and "indices" in b:
+                    rows_html = ""
+                    for iname, d in b["indices"].items():
+                        rc  = "#22c55e" if d.get("pass") else "#ef4444"
+                        best = "★ BEST" if b.get("best") == iname else ""
+                        rows_html += f"""
+<tr style="background:{'#22c55e12' if b.get('best')==iname else '#181c24'}">
+  <td style="padding:6px;color:{rc};font-weight:800;">{iname} <span style="color:{rc};font-size:9px;">{best}</span></td>
+  <td style="padding:6px;text-align:center;color:{'#22c55e' if d.get('ivr',0)>50 else '#ef4444'};font-weight:700;">{d.get('ivr',0)}%</td>
+  <td style="padding:6px;text-align:center;color:#e2e8f0;">{d.get('ivp',0)}%</td>
+  <td style="padding:6px;text-align:center;color:#e2e8f0;">{d.get('iv',0)}%</td>
+  <td style="padding:6px;text-align:center;color:#e2e8f0;">{d.get('hv',0)}%</td>
+  <td style="padding:6px;text-align:center;color:{'#22c55e' if d.get('iv',0)>=d.get('hv',0) else '#ef4444'};font-size:11px;">{'IV≥HV ✓' if d.get('iv',0)>=d.get('hv',0) else 'IV<HV ✗'}</td>
+  <td style="padding:6px;text-align:center;">
+    <span style="background:{rc}22;color:{rc};border:1px solid {rc}44;
+          border-radius:4px;padding:2px 6px;font-size:10px;font-weight:700;">
+      {'OK' if d.get('pass') else 'NO'}
+    </span>
+  </td>
+</tr>"""
+                    st.markdown(f"""
+<div style="overflow-x:auto;">
+<table style="width:100%;border-collapse:collapse;font-size:12px;">
+  <thead>
+    <tr style="background:#252a35;">
+      <th style="padding:6px;text-align:left;color:#64748b;font-size:10px;">INDICE</th>
+      <th style="padding:6px;text-align:center;color:#64748b;font-size:10px;">IVR</th>
+      <th style="padding:6px;text-align:center;color:#64748b;font-size:10px;">IVP</th>
+      <th style="padding:6px;text-align:center;color:#64748b;font-size:10px;">IV</th>
+      <th style="padding:6px;text-align:center;color:#64748b;font-size:10px;">HV</th>
+      <th style="padding:6px;text-align:center;color:#64748b;font-size:10px;">IV vs HV</th>
+      <th style="padding:6px;text-align:center;color:#64748b;font-size:10px;">STATO</th>
+    </tr>
+  </thead>
+  <tbody>{rows_html}</tbody>
+</table>
+</div>
+<div style="font-size:10px;color:#64748b;margin-top:8px;">
+  B1 passa se <b style="color:#e2e8f0;">almeno un indice</b> ha IVR&gt;50 e IV≥HV.
+</div>""", unsafe_allow_html=True)
+
+                # B2 — eventi
+                elif key == "B2_macro":
+                    evts = b.get("events", [])
+                    if evts:
+                        for ev in evts:
+                            st.markdown(
+                                f'<div style="color:#f59e0b;font-size:12px;">⚠ {ev}</div>',
+                                unsafe_allow_html=True
+                            )
+                    else:
+                        st.markdown(
+                            '<div style="color:#22c55e;font-size:12px;">'
+                            '✓ Nessun evento critico rilevato</div>',
+                            unsafe_allow_html=True
+                        )
+
+                # B3 — yields
+                elif key == "B3_yields":
+                    c1t, c2t = st.columns(2)
+                    c1t.metric("Treasury 10Y", f"{b.get('tnx','?')}%")
+                    c2t.metric("Var. 3 giorni",
+                               f"{b.get('change3d', 0):+.2f}%",
+                               delta_color="inverse")
+
+                # B5 — VIX
+                elif key == "B5_trend":
+                    c1t, c2t = st.columns(2)
+                    c1t.metric("VIX", b.get("vix", "?"))
+                    c2t.metric("Trend forte",
+                               "SÌ ✗" if b.get("trending") else "NO ✓")
+
+        # ── SETUP PROPOSTO ────────────────────────────────────────
+        setup = result.get("setup")
+        if result.get("verdict") == "GO" and setup:
+            st.markdown("---")
+            st.markdown("### 🎯 Setup Proposto")
+            s = setup
+            rows_s = [
+                ("Sottostante",         s.get("underlying", "—")),
+                ("Scadenza",            s.get("expiration", "—")),
+                ("DTE",                 f"{s.get('dte','?')} giorni"),
+                ("Put short",           f"{s.get('put_short','?')}  (Δ {s.get('put_short_delta','~0.17')})"),
+                ("Put long",            f"{s.get('put_long','?')}"),
+                ("Call short",          f"{s.get('call_short','?')}  (Δ {s.get('call_short_delta','~0.17')})"),
+                ("Call long",           f"{s.get('call_long','?')}"),
+                ("Credito incassato",   f"${s.get('credit','?')}"),
+                ("Max loss",            f"${s.get('max_loss','?')}"),
+                ("Breakeven basso",     s.get("breakeven_low", "?")),
+                ("Breakeven alto",      s.get("breakeven_high", "?")),
+                ("Take profit 50%",     f"${s.get('tp_target','?')}"),
+                ("Stop loss 200%",      f"${s.get('sl_trigger','?')}"),
+            ]
+            html_rows = "".join(kv_row(k, v) for k, v in rows_s)
+            st.markdown(f"""
+<div style="background:#181c24;border:1px solid #22c55e40;
+     border-radius:12px;padding:16px 20px;">
+  {html_rows}
+</div>""", unsafe_allow_html=True)
+
+        # ── ASSIGNMENT RISK ───────────────────────────────────────
         st.info(
-            "B1-B5 risultano favorevoli, ma non è disponibile una option "
-            "chain: nessuno strike/delta/credito viene inventato."
+            "ℹ **Rischio assignment:** "
+            + result.get("assignment_risk",
+                         "XSP, XND e RUTW sono European-style cash-settled — "
+                         "nessun rischio di esercizio anticipato.")
         )
 
-    st.info(
-        result.get(
-            "assignment_risk",
-            "Verifica sempre le caratteristiche del contratto specifico.",
+        st.caption(
+            f"Analisi generata il "
+            f"{datetime.now(ZoneInfo('Europe/Rome')).strftime('%d/%m/%Y %H:%M')} (ora di Roma)"
         )
-    )
-
-    st.caption(
-        "Analisi generata il "
-        + datetime.now(ROME_TZ).strftime("%d/%m/%Y %H:%M")
-        + " (ora di Roma)"
-    )
