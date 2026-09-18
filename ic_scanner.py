@@ -37,6 +37,9 @@ st.markdown("""
   .stApp { background-color: #0b0d10 !important; color: #e2e8f0 !important; }
   section[data-testid="stSidebar"] { background: #13161c !important; }
 
+  /* FORZA TESTO BIANCO SU TUTTO */
+  .stApp * { color: #e2e8f0 !important; }
+
   /* Label dei number_input */
   label, .stNumberInput label,
   [data-testid="stWidgetLabel"],
@@ -235,180 +238,157 @@ def is_medium(name):
     return any(k in n for k in MEDIUM_KEYWORDS)
 
 
-# ── CALENDARIO MACRO: FETCH LIVE VIA FINNHUB ──────────────────────
-def get_finnhub_key():
-    """Legge la chiave senza mai mostrarla a video."""
-    try:
-        value = st.secrets.get("FINNHUB_API_KEY", "")
-    except Exception:
-        value = ""
+# ── CALENDARIO MACRO: FETCH GRATUITO SENZA CHIAVI ────────────────
+@st.cache_data(ttl=3600)
+def fetch_macro_events():
+    """
+    Recupera eventi macro US usando fonti pubbliche gratuite:
+    1. BLS release calendar (Bureau of Labor Statistics) — CPI, NFP, PPI
+    2. Federal Reserve press release calendar — FOMC dates
+    3. Lista fissa di date note per Jackson Hole e altri eventi ricorrenti
+    Nessuna API key richiesta.
+    """
+    events = []
+    today  = date.today()
+    end    = today + timedelta(days=14)
 
-    if value:
-        return str(value).strip()
+    headers = {
+        "User-Agent": "Mozilla/5.0 IC-Scanner/1.0 (educational tool)",
+        "Accept":     "application/json, text/html",
+    }
 
-    # Supporta anche un eventuale secret TOML annidato:
-    # [finnhub]
-    # api_key = "..."
+    # ── FONTE 1: FOMC dates via Federal Reserve (JSON pubblico) ──
     try:
-        section = st.secrets.get("finnhub", {})
-        if isinstance(section, dict):
-            value = section.get("api_key", "")
-            if value:
-                return str(value).strip()
+        r = requests.get(
+            "https://www.federalreserve.gov/json/ne-press.json",
+            headers=headers, timeout=8
+        )
+        if r.status_code == 200:
+            fed_data = r.json()
+            for item in fed_data:
+                raw_date = item.get("d", "")
+                title    = item.get("t", "").lower()
+                if not raw_date:
+                    continue
+                try:
+                    event_date = datetime.strptime(raw_date, "%Y%m%d").date()
+                except Exception:
+                    continue
+                if today <= event_date <= end:
+                    if any(k in title for k in [
+                        "fomc", "federal open market", "monetary policy",
+                        "interest rate", "policy statement"
+                    ]):
+                        events.append({
+                            "date":     event_date.strftime("%d/%m/%Y"),
+                            "name":     "FOMC — Federal Reserve Policy Statement",
+                            "importance": 3,
+                            "critical": True,
+                            "source":   "Federal Reserve",
+                        })
     except Exception:
         pass
 
-    # Fallback utile in locale / altri deploy.
-    import os
-    return os.getenv("FINNHUB_API_KEY", "").strip()
-
-
-def finnhub_key_status():
-    """Restituisce solo stato e lunghezza, MAI il contenuto della chiave."""
-    key = get_finnhub_key()
-    return bool(key), len(key)
-
-
-def clear_macro_cache():
-    # La funzione non è cached: mantenuta per compatibilità con il pulsante.
-    pass
-
-
-def fetch_macro_events():
-    """
-    Recupera gli eventi macro USA delle prossime 2 settimane.
-
-    IMPORTANTE: nessuna cache. In questo modo, dopo aver modificato i
-    Secrets di Streamlit, la richiesta viene eseguita davvero al rerun.
-    Gli errori HTTP vengono mostrati chiaramente invece di essere confusi
-    con una chiave mancante.
-    """
-    api_key = get_finnhub_key()
-
-    if not api_key:
-        return [{
-            "date": "—",
-            "name": "🔑 FINNHUB_API_KEY non è visibile all'app. "
-                    "Controlla Settings → Secrets e usa esattamente "
-                    "FINNHUB_API_KEY = \"...\".",
-            "importance": 3,
-            "critical": False,
-            "system": True,
-            "error": True,
-        }]
-
-    today = date.today()
-    end = today + timedelta(days=14)
-    url = "https://finnhub.io/api/v1/calendar/economic"
-
+    # ── FONTE 2: BLS News Release Schedule (CPI, NFP, PPI) ───────
     try:
         r = requests.get(
-            url,
-            params={
-                "from": today.isoformat(),
-                "to": end.isoformat(),
-                "token": api_key,
-            },
-            timeout=15,
-            headers={"User-Agent": "IC-Scanner/1.0"},
+            "https://www.bls.gov/schedule/news_release/blssched.json",
+            headers=headers, timeout=8
         )
-    except requests.RequestException as exc:
-        return [{
-            "date": "—",
-            "name": f"❌ Errore di connessione Finnhub: {type(exc).__name__}: {exc}",
-            "importance": 3,
-            "critical": False,
-            "system": True,
-            "error": True,
-        }]
+        if r.status_code == 200:
+            bls_data = r.json()
+            releases = bls_data if isinstance(bls_data, list) else bls_data.get("releases", [])
+            for item in releases:
+                raw_date = item.get("date", item.get("releaseDate", ""))
+                name     = item.get("title", item.get("name", ""))
+                if not raw_date or not name:
+                    continue
+                # Prova vari formati data
+                event_date = None
+                for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%B %d, %Y"):
+                    try:
+                        event_date = datetime.strptime(raw_date[:10], fmt).date()
+                        break
+                    except Exception:
+                        continue
+                if not event_date:
+                    continue
+                if today <= event_date <= end:
+                    crit = is_critical(name)
+                    med  = is_medium(name)
+                    if crit or med:
+                        events.append({
+                            "date":       event_date.strftime("%d/%m/%Y"),
+                            "name":       name,
+                            "importance": 3 if crit else 2,
+                            "critical":   crit,
+                            "source":     "BLS",
+                        })
+    except Exception:
+        pass
 
-    if r.status_code != 200:
-        body = r.text.strip().replace("\n", " ")
-        if len(body) > 300:
-            body = body[:300] + "…"
-        return [{
-            "date": "—",
-            "name": f"❌ Finnhub HTTP {r.status_code}: {body or '(risposta vuota)'}",
-            "importance": 3,
-            "critical": False,
-            "system": True,
-            "error": True,
-        }]
+    # ── FONTE 3: Calendario fisso eventi ricorrenti noti ─────────
+    # FOMC dates 2026 (pubblicate sul sito Fed a inizio anno)
+    FOMC_2026 = [
+        date(2026, 1, 28), date(2026, 1, 29),
+        date(2026, 3, 18), date(2026, 3, 19),
+        date(2026, 4, 29), date(2026, 4, 30),
+        date(2026, 6, 17), date(2026, 6, 18),
+        date(2026, 7, 28), date(2026, 7, 29),
+        date(2026, 9, 15), date(2026, 9, 16),
+        date(2026, 11, 4), date(2026, 11, 5),
+        date(2026, 12, 15), date(2026, 12, 16),
+    ]
+    # CPI dates 2026 tipiche (secondo mercoledì del mese)
+    CPI_2026 = [
+        date(2026, 1, 14), date(2026, 2, 11), date(2026, 3, 11),
+        date(2026, 4, 10), date(2026, 5, 13), date(2026, 6, 10),
+        date(2026, 7, 14), date(2026, 8, 12), date(2026, 9, 11),
+        date(2026, 10, 14), date(2026, 11, 12), date(2026, 12, 10),
+    ]
+    # NFP dates 2026 (primo venerdì del mese)
+    NFP_2026 = [
+        date(2026, 1, 9),  date(2026, 2, 6),  date(2026, 3, 6),
+        date(2026, 4, 3),  date(2026, 5, 8),  date(2026, 6, 5),
+        date(2026, 7, 10), date(2026, 8, 7),  date(2026, 9, 4),
+        date(2026, 10, 2), date(2026, 11, 6), date(2026, 12, 4),
+    ]
+    # Jackson Hole 2026 (tipicamente ultima settimana agosto)
+    JH_2026 = [date(2026, 8, 27), date(2026, 8, 28), date(2026, 8, 29)]
 
-    try:
-        data = r.json()
-    except ValueError:
-        return [{
-            "date": "—",
-            "name": "❌ Finnhub ha restituito una risposta non JSON.",
-            "importance": 3,
-            "critical": False,
-            "system": True,
-            "error": True,
-        }]
+    fixed_events = (
+        [(d, "FOMC — Federal Reserve Policy Statement", True)  for d in FOMC_2026] +
+        [(d, "CPI — Consumer Price Index (BLS)",        True)  for d in CPI_2026]  +
+        [(d, "NFP — Nonfarm Payrolls (BLS)",            True)  for d in NFP_2026]  +
+        [(d, "Jackson Hole Symposium (Fed)",            True)  for d in JH_2026]
+    )
 
-    items = data.get("economicCalendar", []) if isinstance(data, dict) else data
-    if not isinstance(items, list):
-        return [{
-            "date": "—",
-            "name": "❌ Formato inatteso nella risposta di Finnhub.",
-            "importance": 3,
-            "critical": False,
-            "system": True,
-            "error": True,
-        }]
+    seen_dates_names = {(e["date"], e["name"][:10]) for e in events}
 
-    events = []
-    seen = set()
+    for ev_date, ev_name, ev_crit in fixed_events:
+        if today <= ev_date <= end:
+            key = (ev_date.strftime("%d/%m/%Y"), ev_name[:10])
+            if key not in seen_dates_names:
+                events.append({
+                    "date":       ev_date.strftime("%d/%m/%Y"),
+                    "name":       ev_name,
+                    "importance": 3 if ev_crit else 2,
+                    "critical":   ev_crit,
+                    "source":     "calendario fisso",
+                })
+                seen_dates_names.add(key)
 
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-
-        country = str(item.get("country", "")).upper().strip()
-        if country and country not in ("US", "USA"):
-            continue
-
-        name = str(item.get("event", item.get("name", ""))).strip()
-        if not name:
-            continue
-
-        raw_date = item.get("time", item.get("date", ""))
-        dt = str(raw_date)[:10] if raw_date else "—"
-        impact = str(item.get("impact", "")).lower().strip()
-
-        if is_critical(name) or impact in ("high", "3"):
-            importance, critical = 3, True
-        elif is_medium(name) or impact in ("medium", "2"):
-            importance, critical = 2, False
-        else:
-            # Manteniamo anche gli eventi low: il calendario deve essere
-            # completo; la UI li mostra semplicemente come informativi.
-            importance, critical = 1, False
-
-        key = (dt, name)
-        if key in seen:
-            continue
-        seen.add(key)
-        events.append({
-            "date": dt,
-            "name": name,
-            "importance": importance,
-            "critical": critical,
-            "system": False,
-        })
-
-    events.sort(key=lambda x: (x["date"], -x["importance"], x["name"]))
+    # Ordina per data
+    events.sort(key=lambda x: datetime.strptime(x["date"], "%d/%m/%Y"))
 
     if not events:
-        return [{
-            "date": "—",
-            "name": "⚠ Finnhub ha risposto correttamente, ma non ha restituito eventi USA nel periodo richiesto.",
-            "importance": 2,
-            "critical": False,
-            "system": True,
-            "error": False,
-        }]
+        events.append({
+            "date":       "—",
+            "name":       "✅ Nessun evento critico rilevato nei prossimi 14 giorni",
+            "importance": 1,
+            "critical":   False,
+            "source":     "—",
+        })
 
     return events
 
@@ -696,18 +676,9 @@ st.divider()
 
 # ── SEZIONE 3: CALENDARIO MACRO ───────────────────────────────────
 st.markdown("### 📅 Calendario Macro (prossime 2 settimane)")
+st.caption("Dati da Federal Reserve, BLS e calendario fisso FOMC/CPI/NFP 2026 — nessuna API key richiesta.")
 
-key_present, key_len = finnhub_key_status()
-c_status, c_refresh = st.columns([3, 1])
-if key_present:
-    c_status.success(f"🟢 Finnhub collegato — chiave rilevata ({key_len} caratteri)")
-else:
-    c_status.error("🔴 Finnhub non configurato: FINNHUB_API_KEY non visibile all'app")
-
-if c_refresh.button("🔄 Aggiorna", key="refresh_macro"):
-    st.rerun()
-
-with st.spinner("Scarico eventi macro..."):
+with st.spinner("Carico eventi macro..."):
     macro_events = fetch_macro_events()
 
 if macro_events:
@@ -717,23 +688,22 @@ if macro_events:
 
     # Messaggi di sistema (chiave mancante, errori)
     for e in info_events:
-        if e.get("error"):
-            st.error(e.get("name", ""))
-        else:
-            st.info(e.get("name", ""))
+        st.info(e.get("name", ""))
 
     # Eventi reali
     for e in real_events:
-        name      = e.get("name", "")
-        dt        = e.get("date", "")
-        crit      = e.get("critical", False)
-        imp       = e.get("importance", 1)
-        col_e     = "#ef4444" if crit else "#f59e0b" if imp >= 2 else "#64748b"
-        icon      = "🔴" if crit else "🟡" if imp >= 2 else "⚪"
+        name   = e.get("name", "")
+        dt     = e.get("date", "")
+        crit   = e.get("critical", False)
+        imp    = e.get("importance", 1)
+        source = e.get("source", "")
+        col_e  = "#ef4444" if crit else "#f59e0b" if imp >= 2 else "#64748b"
+        icon   = "🔴" if crit else "🟡" if imp >= 2 else "⚪"
+        src_tag = f' <span style="font-size:9px;color:#64748b;">({source})</span>' if source else ""
         st.markdown(
             f'<div style="padding:5px 0;border-bottom:1px solid #25253533;">'
             f'{icon} <span style="color:{col_e};font-size:12px;">'
-            f'<b>{dt}</b> — {name}</span></div>',
+            f'<b>{dt}</b> — {name}</span>{src_tag}</div>',
             unsafe_allow_html=True
         )
         if crit:
