@@ -15,7 +15,6 @@ Deploy su Streamlit Cloud:
 """
 
 import streamlit as st
-import anthropic
 import requests
 import json
 import re
@@ -430,38 +429,26 @@ def parse_robust(raw):
 
 
 def run_analysis(vol_data, macro_events, tnx, tnx_var, vix, note):
-    api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+    api_key = st.secrets.get("GROQ_API_KEY", "")
     if not api_key:
-        st.error("⚠ Chiave API Anthropic non configurata. Aggiungila nei Secrets di Streamlit.")
+        st.error("⚠ Chiave GROQ_API_KEY non trovata nei Secrets. "
+                 "Aggiungila su share.streamlit.io → Settings → Secrets.")
         return None
-
-    client = anthropic.Anthropic(api_key=api_key)
 
     today = datetime.now(ZoneInfo("Europe/Rome")).strftime("%A %d %B %Y")
 
-    # ── VETO PRE-AI: calcola blocchi critici in Python ────────────
-    # B1: almeno un indice con IVR>50 E iv>=hv
+    # ── VETO PRE-AI in Python ─────────────────────────────────────
     b1_pass = any(
         float(d.get("ivr", 0)) > 50 and float(d.get("iv", 0)) >= float(d.get("hv", 0))
-        for d in vol_data.values()
-        if d.get("ivr")
+        for d in vol_data.values() if d.get("ivr")
     )
-
-    # B2: nessun evento critico nelle prossime 2 settimane
     real_critical = [
         e for e in macro_events
         if e.get("critical", False) and e.get("date", "—") != "—"
     ]
-    b2_pass = len(real_critical) == 0
-
-    # B3: TNX < 4.5 e variazione < 0.15
-    b3_pass = tnx < 4.5 and abs(tnx_var) < 0.15
-
-    # B5: VIX < 20
-    b5_pass = vix < 20
-
-    # ── VETO ASSOLUTO ─────────────────────────────────────────────
-    # Se B1 o B2 falliscono → NO. Sempre. Senza eccezioni.
+    b2_pass        = len(real_critical) == 0
+    b3_pass        = tnx < 4.5 and abs(tnx_var) < 0.15
+    b5_pass        = vix < 20
     veto_triggered = not b1_pass or not b2_pass
     veto_reason    = []
     if not b1_pass:
@@ -470,105 +457,103 @@ def run_analysis(vol_data, macro_events, tnx, tnx_var, vix, note):
         events_str = ", ".join(
             f"{e['date']} {e['name']}" for e in real_critical[:3]
         )
-        veto_reason.append(f"B2 FALLISCE: eventi critici in calendario ({events_str})")
+        veto_reason.append(f"B2 FALLISCE: eventi critici ({events_str})")
 
     vol_summary = "\n".join([
         f"  {idx}: IV={d['iv']}% HV={d['hv']}% IVR={d['ivr']}% "
-        f"IVP={d['ivp']}% Prezzo={d.get('price', 'n/d')}"
-        for idx, d in vol_data.items()
-        if d.get("ivr")
+        f"IVP={d['ivp']}% Prezzo={d.get('price','n/d')}"
+        for idx, d in vol_data.items() if d.get("ivr")
     ])
-
     macro_summary = "\n".join([
         f"  {e['date']} — {e['name']} {'⚠ CRITICO' if e.get('critical') else ''}"
-        for e in macro_events[:10]
-        if e.get("date", "—") != "—"
+        for e in macro_events[:10] if e.get("date", "—") != "—"
     ]) or "  Nessun evento rilevato"
 
-    prompt = f"""Oggi è {today}.
+    system = """Sei un assistente per opzioni finanziarie. Rispondi SOLO con JSON puro, no markdown, no backtick.
 
-DATI REALI DI VOLATILITÀ (usali ESATTAMENTE nel blocco B1, non inventare):
+REGOLE DI VETO ASSOLUTE:
+  - Se VETO ASSOLUTO ATTIVO=True: verdict = "NO" OBBLIGATORIO, sempre.
+  - Se B2_pass=false: verdict = "NO" OBBLIGATORIO.
+  - Se B1_pass=false: verdict = "NO" OBBLIGATORIO.
+
+REGOLE NORMALI (solo se veto non attivo):
+  GO = tutti 5 i blocchi passano.
+  WAIT = 3-4 blocchi passano.
+  NO = meno di 3 blocchi passano.
+  B3 pass = tnx < 4.5 E variazione 3gg < 0.15.
+  B4 pass = DTE 21-30 e delta short 0.15-0.20.
+  B5 pass = vix < 20 E no trend forte.
+
+Note MAX 60 caratteri. Motivation MAX 280 caratteri.
+Struttura JSON (rispetta esattamente):
+{"verdict":"NO","score":1,"blocks":{"B1_volatility":{"pass":false,"best":"XND","note":"nota max 60 char","indices":{"XSP":{"pass":false,"ivr":14.02,"ivp":10,"iv":12.10,"hv":12.23},"XND":{"pass":false,"ivr":60.78,"ivp":40,"iv":19.22,"hv":22.27},"RUTW":{"pass":false,"ivr":45,"ivp":35,"iv":16.5,"hv":18.2}}},"B2_macro":{"pass":false,"events":["02/10 NFP"],"note":"NFP presente veto attivo"},"B3_yields":{"pass":true,"tnx":4.25,"change3d":0.0,"note":"TNX stabile"},"B4_structure":{"pass":true,"dte_ok":true,"credit_ok":true,"note":"DTE 28gg delta 0.17"},"B5_trend":{"pass":true,"vix":15.0,"trending":false,"note":"mercato laterale"}},"setup":{"underlying":"XND","expiration":"2026-10-16","dte":28,"put_short":280,"put_short_delta":0.17,"put_long":270,"call_short":310,"call_short_delta":0.16,"call_long":320,"credit":380,"max_loss":620,"breakeven_low":276.2,"breakeven_high":313.8,"tp_target":190,"sl_trigger":760},"motivation":"Motivazione in italiano max 280 caratteri.","assignment_risk":"Zero — European-style cash-settled."}"""
+
+    user_msg = f"""Oggi è {today}.
+
+DATI REALI VOLATILITÀ (usali ESATTAMENTE in B1):
 {vol_summary}
 
 EVENTI MACRO PROSSIME 2 SETTIMANE:
 {macro_summary}
 
-VALUTAZIONE PRE-CALCOLATA (VINCOLANTE — non puoi ignorarla):
+VALUTAZIONE PRE-CALCOLATA (VINCOLANTE):
   B1 passa: {b1_pass}
-  B2 passa: {b2_pass} {'— VETO ATTIVO: eventi critici presenti' if not b2_pass else ''}
+  B2 passa: {b2_pass}
   B3 passa: {b3_pass}
   B5 passa: {b5_pass}
   VETO ASSOLUTO ATTIVO: {veto_triggered}
-  {'MOTIVO VETO: ' + ' | '.join(veto_reason) if veto_triggered else ''}
+  {'MOTIVO: ' + ' | '.join(veto_reason) if veto_triggered else ''}
+  TNX={tnx}% variazione={tnx_var:+.2f}% VIX={vix}
+{f'Note: {note}' if note else ''}
 
-DATI AGGIUNTIVI:
-  Treasury 10Y (TNX): {tnx}%
-  Variazione TNX ultimi 3 giorni: {tnx_var:+.2f}%
-  VIX: {vix}
-{f"  Note operatore: {note}" if note else ""}
-
-{'ISTRUZIONE VINCOLANTE: il veto è attivo. verdict DEVE essere NO. Non scrivere GO o WAIT.' if veto_triggered else ''}
-Analizza e rispondi SOLO con JSON."""
-
-    system = """Sei un assistente per opzioni finanziarie. Rispondi SOLO con JSON puro, no markdown, no backtick.
-
-REGOLE DI VETO ASSOLUTE — queste hanno priorità su tutto:
-  - Se B2_pass=false nel prompt (eventi FOMC/CPI/NFP/Jackson Hole presenti): verdict = "NO" OBBLIGATORIO
-  - Se B1_pass=false nel prompt (nessun indice con IVR>50 e IV>=hv): verdict = "NO" OBBLIGATORIO
-  - Se VETO ASSOLUTO ATTIVO=True nel prompt: verdict = "NO" OBBLIGATORIO, SEMPRE
-  - Non esiste nessuna combinazione di altri blocchi che possa produrre GO se il veto è attivo
-
-REGOLE NORMALI (solo se veto non attivo):
-  B1 pass = almeno un indice ha IVR>50 E iv>=hv
-  B2 pass = nessun evento FOMC/CPI/NFP/Jackson Hole nella lista
-  B3 pass = tnx < 4.5 E variazione 3gg < 0.15
-  B4 pass = esiste setup valido con DTE 21-30 e delta 0.15-0.20 sulle short
-  B5 pass = vix < 20 E no trend forte
-  GO solo se tutti e 5 i blocchi passano.
-  WAIT se 3-4 blocchi passano.
-  NO se meno di 3 blocchi passano O se veto attivo.
-
-DELTA: gli strike short del setup devono essere a delta 0.15-0.20.
-  Aggiungi nel setup: "put_short_delta" e "call_short_delta" (valori tra 0.15 e 0.20).
-
-Note MAX 60 caratteri. Motivation MAX 300 caratteri.
-Struttura JSON esatta:
-{"verdict":"NO","score":1,"blocks":{"B1_volatility":{"pass":false,"best":"XND","note":"IVR ok ma IV sotto HV","indices":{"XSP":{"pass":false,"ivr":14.02,"ivp":10,"iv":12.10,"hv":12.23},"XND":{"pass":false,"ivr":60.78,"ivp":40,"iv":19.22,"hv":22.27},"RUTW":{"pass":false,"ivr":45,"ivp":35,"iv":16.5,"hv":18.2}}},"B2_macro":{"pass":false,"events":["11 set CPI","16 set FOMC"],"note":"CPI e FOMC presenti — veto attivo"},"B3_yields":{"pass":true,"tnx":4.21,"change3d":0.06,"note":"TNX stabile"},"B4_structure":{"pass":true,"dte_ok":true,"credit_ok":true,"note":"DTE 28gg delta 0.17"},"B5_trend":{"pass":true,"vix":15.2,"trending":false,"note":"mercato laterale"}},"setup":{"underlying":"XND","expiration":"2026-09-18","dte":28,"put_short":280,"put_short_delta":0.17,"put_long":270,"call_short":310,"call_short_delta":0.16,"call_long":320,"credit":380,"max_loss":620,"breakeven_low":276.2,"breakeven_high":313.8,"tp_target":190,"sl_trigger":760},"motivation":"VETO: CPI 11 set e FOMC 16 set nelle prossime 2 settimane. Non aprire IC. Aspetta dopo il 16 settembre.","assignment_risk":"Zero — European-style cash-settled."}"""
+{'ISTRUZIONE VINCOLANTE: veto attivo. verdict = NO obbligatorio.' if veto_triggered else ''}
+Rispondi SOLO con JSON."""
 
     try:
-        msg = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=2000,
-            system=system,
-            messages=[{"role": "user", "content": prompt}],
+        resp = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type":  "application/json",
+            },
+            json={
+                "model":       "llama-3.3-70b-versatile",
+                "temperature": 0.1,
+                "max_tokens":  2000,
+                "messages": [
+                    {"role": "system",  "content": system},
+                    {"role": "user",    "content": user_msg},
+                ],
+            },
+            timeout=30,
         )
-        raw = msg.content[0].text
+        resp.raise_for_status()
+        raw    = resp.json()["choices"][0]["message"]["content"]
         result = parse_robust(raw)
 
-        # ── OVERRIDE DI SICUREZZA IN PYTHON ──────────────────────
-        # Se il modello ha ignorato il veto, lo forziamo qui
+        # ── OVERRIDE DI SICUREZZA ─────────────────────────────────
         if result and veto_triggered:
             if result.get("verdict") in ("GO", "WAIT"):
-                result["verdict"] = "NO"
-                result["score"]   = min(result.get("score", 0),
-                                        sum([b3_pass, b5_pass]))
+                result["verdict"]    = "NO"
+                result["score"]      = sum([b3_pass, b5_pass])
                 result["motivation"] = (
-                    "⛔ VETO AUTOMATICO: " + " | ".join(veto_reason) +
-                    ". Non aprire Iron Condor finché questi blocchi non passano."
+                    "⛔ VETO: " + " | ".join(veto_reason) +
+                    ". Non aprire IC finché questi blocchi non passano."
                 )
-                # Forza B2 a false se ci sono eventi critici
                 if not b2_pass and "B2_macro" in result.get("blocks", {}):
-                    result["blocks"]["B2_macro"]["pass"] = False
+                    result["blocks"]["B2_macro"]["pass"]   = False
                     result["blocks"]["B2_macro"]["events"] = [
-                        f"{e['date']} — {e['name']}"
-                        for e in real_critical[:5]
+                        f"{e['date']} — {e['name']}" for e in real_critical[:5]
                     ]
-                    result["blocks"]["B2_macro"]["note"] = (
-                        "VETO: eventi critici presenti"
-                    )
+                    result["blocks"]["B2_macro"]["note"] = "VETO: eventi critici"
+                if not b1_pass and "B1_volatility" in result.get("blocks", {}):
+                    result["blocks"]["B1_volatility"]["pass"] = False
 
         return result
 
+    except requests.HTTPError as e:
+        st.error(f"Errore Groq HTTP {e.response.status_code}: {e.response.text[:200]}")
+        return None
     except Exception as e:
         st.error(f"Errore API: {e}")
         return None
